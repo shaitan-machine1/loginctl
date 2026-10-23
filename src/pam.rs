@@ -494,7 +494,7 @@ fn exists_label(exists: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{symlink, MetadataExt};
     use tempfile::TempDir;
 
     const BASE: &str = concat!(
@@ -558,6 +558,8 @@ mod tests {
         assert_eq!(before.gid(), after.gid());
         assert_eq!(before.mode() & 0o7777, after.mode() & 0o7777);
         assert_eq!(backup_count(&directory), 1);
+        let backup = backups(&directory).pop().expect("backup path");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), BASE);
 
         let second = activate_fixture(&path).expect("idempotent activate");
         assert!(second.contains("already active"));
@@ -644,6 +646,21 @@ mod tests {
     }
 
     #[test]
+    fn public_mutation_requires_root_and_symlink_targets_are_rejected() {
+        let (directory, path) = fixture(BASE);
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(activate(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("already-root"));
+        }
+        let link = directory.path().join("linked-policy");
+        symlink(&path, &link).expect("create fixture symlink");
+        assert!(status(&link).is_err());
+    }
+
+    #[test]
     fn recognizes_bracketed_control_and_absolute_module_paths() {
         assert_eq!(
             session_module("-session [success=1 default=ignore] /usr/lib/security/pam_env.so"),
@@ -653,19 +670,23 @@ mod tests {
         assert_eq!(session_module("# session required pam_env.so"), None);
     }
 
-    fn backup_count(directory: &TempDir) -> usize {
+    fn backups(directory: &TempDir) -> Vec<PathBuf> {
         directory
             .path()
             .read_dir()
             .unwrap()
-            .filter(|entry| {
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
                 entry
-                    .as_ref()
-                    .unwrap()
                     .file_name()
                     .to_string_lossy()
                     .contains("loginctl-backup")
+                    .then(|| entry.path())
             })
-            .count()
+            .collect()
+    }
+
+    fn backup_count(directory: &TempDir) -> usize {
+        backups(directory).len()
     }
 }
