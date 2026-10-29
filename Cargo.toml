@@ -3,21 +3,20 @@ name = "loginctl"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Unified administration for the decoupled login stack"
 
 [dependencies]
-aclad-api = { git = "ssh://git@github.com/shaitan-machine1/aclad.git", rev = "98e55db813bd1bccc00daf6f1dd85d6b4974215c", version = "=0.1.0" }
+aclad-api = { path = "../aclad/crates/aclad-api" }
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
+dbus = "0.9.12"
 libc = "0.2.191"
-multiseat-api = { git = "ssh://git@github.com/shaitan-machine1/multiseat.git", rev = "21d7a8ff8611eafc6e21b5c9e18dc6393b315709", version = "=0.1.0" }
-scope-id = { git = "ssh://git@github.com/shaitan-machine1/scoped.git", rev = "ce14167a2e344920d091343d64397117ba0146be", version = "=0.1.0" }
-scoped-api = { git = "ssh://git@github.com/shaitan-machine1/scoped.git", rev = "ce14167a2e344920d091343d64397117ba0146be", version = "=0.1.0" }
+lib-scoped = { path = "../sessiond/crates/lib-scoped" }
+lib-sessiond = { path = "../sessiond/crates/lib-sessiond" }
+multiseat-api = { path = "../multiseat/crates/multiseat-api" }
 seat-udev = { git = "ssh://git@github.com/shaitan-machine1/seat-udev.git", rev = "00126146f8e1ba1417ed4ec31541a079cff57f47", version = "=0.1.0", features = ["assign"] }
-sessiond-api = { git = "ssh://git@github.com/shaitan-machine1/sessiond.git", rev = "f6dce47ba9f8a1aaa3975943483d6870ee9b612a", version = "=0.1.0" }
-tokio = { version = "1.50.0", features = ["rt", "time"] }
-zbus = { version = "6.0.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+dbus-crossroads = "0.5.3"
 tempfile = "3.26.0"

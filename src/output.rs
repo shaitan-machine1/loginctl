@@ -1,6 +1,6 @@
 use aclad_api::GrantDescription;
+use lib_sessiond::Session;
 use multiseat_api::RefreshDescription;
-use sessiond_api::SessionDescription;
 use std::fmt::Write;
 
 pub fn seats(seats: &[String]) -> String {
@@ -14,32 +14,41 @@ pub fn seats(seats: &[String]) -> String {
     output
 }
 
-pub fn sessions(sessions: &[SessionDescription]) -> String {
+pub fn sessions(sessions: &[Session]) -> String {
     if sessions.is_empty() {
         return "No sessions.\n".to_owned();
     }
     let session_width = sessions
         .iter()
-        .map(|(sid, _)| sid.len())
+        .map(|session| session.id.len())
         .chain(["SESSION".len()])
         .max()
         .expect("heading provides a width");
     let uid_width = sessions
         .iter()
-        .map(|(_, uid)| uid.to_string().len())
+        .map(|session| session.uid.to_string().len())
         .chain(["UID".len()])
         .max()
         .expect("heading provides a width");
     let mut output = String::new();
     writeln!(
         output,
-        "{:<session_width$}  {:>uid_width$}",
+        "{:<session_width$}  {:>uid_width$}  LEADER  START",
         "SESSION", "UID"
     )
     .expect("writing to String cannot fail");
-    for (sid, uid) in sessions {
-        writeln!(output, "{sid:<session_width$}  {uid:>uid_width$}")
-            .expect("writing to String cannot fail");
+    for session in sessions {
+        let (leader, start) = session
+            .leader
+            .map_or(("-".to_owned(), "-".to_owned()), |identity| {
+                (identity.pid.to_string(), identity.start_time.to_string())
+            });
+        writeln!(
+            output,
+            "{:<session_width$}  {:>uid_width$}  {leader}  {start}",
+            session.id, session.uid
+        )
+        .expect("writing to String cannot fail");
     }
     output
 }
@@ -143,11 +152,25 @@ mod tests {
     #[test]
     fn renders_aligned_session_and_grant_tables_without_reordering() {
         assert_eq!(
-            sessions(&[(B.to_owned(), 7), (A.to_owned(), 1000)]),
+            sessions(&[
+                Session {
+                    id: B.to_owned(),
+                    uid: 7,
+                    leader: None
+                },
+                Session {
+                    id: A.to_owned(),
+                    uid: 1000,
+                    leader: Some(lib_scoped::ProcessIdentity {
+                        pid: 42,
+                        start_time: 99
+                    })
+                },
+            ]),
             concat!(
-                "SESSION                            UID\n",
-                "1123456789abcdef0123456789abcdef     7\n",
-                "0123456789abcdef0123456789abcdef  1000\n",
+                "SESSION                            UID  LEADER  START\n",
+                "1123456789abcdef0123456789abcdef     7  -  -\n",
+                "0123456789abcdef0123456789abcdef  1000  42  99\n",
             )
         );
         assert_eq!(

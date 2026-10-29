@@ -1,43 +1,53 @@
 # loginctl
 
-`loginctl` is the unified administrator for the decoupled login stack. It uses
-the system bus and the typed `multiseat-api`, `sessiond-api`, `scoped-api`, and
-`aclad-api` crates directly. Seat assignment uses `seat-udev` directly. The
-binary never invokes `sudo`, has no session-bus mode, and leaves authorization
-to the daemons (except local PAM-file mutation, which requires an existing root
-caller).
+Synchronous administrator for the decoupled login stack. It has no async
+runtime. Session inventory and scope operations call `lib-sessiond` and
+`lib-scoped` directly; daemon-backed seat/ACL/session-close calls use blocking
+clients owned by the corresponding API crates. A missing component does not
+break unrelated command groups.
+
+The binary never invokes `sudo`. Direct cgroup operations use the caller's
+permissions and are not coordinated with sessiond's per-UID lifecycle lock, so
+mutating sessiond-owned scopes can be disruptive.
 
 ## Commands
 
 ```text
-loginctl seat list
-loginctl seat status
-loginctl seat refresh [SEAT] [--force]
-loginctl seat assign DEVICE SEAT
-loginctl seat unassign DEVICE
-loginctl seat flush
-
+loginctl seat list|status|refresh|assign|unassign|flush
 loginctl session list
 loginctl session close SESSION
 
 loginctl scope list [PREFIX]
-loginctl scope of PID
+loginctl scope show SCOPE
+loginctl scope of PID [--domain DOMAIN]
+loginctl scope create SCOPE
+loginctl scope move PID SCOPE
+loginctl scope remove SCOPE
 loginctl scope terminate SCOPE
 loginctl scope kill SCOPE
+loginctl scope target list SCOPE
+loginctl scope target show SCOPE TARGET
+loginctl scope target assign SCOPE TARGET PID
+loginctl scope target remove SCOPE TARGET
+loginctl scope target terminate SCOPE TARGET
+loginctl scope target kill SCOPE TARGET
+loginctl scope watch SCOPE
 
-loginctl acl list
-loginctl acl grant SESSION UID SEAT
-loginctl acl revoke SESSION
-
-loginctl pam status
-loginctl pam activate
-loginctl pam deactivate
+loginctl acl list|grant|revoke
+loginctl pam status|activate|deactivate
 ```
 
-Each daemon-backed command opens only the system-bus proxy it needs. A missing
-component therefore does not prevent unrelated command groups from working.
-Seat refresh previews allowlist changes, warns about graphical disruption, and
-requires confirmation unless `--force` is supplied.
+`--cgroup-root` selects the cgroup-v2 mount for direct scope commands.
+`--timeout-seconds` bounds blocking D-Bus, watch, and assignment operations.
+Session list is containment-derived and includes recorded leader PID/start
+identity without probing liveness. Session close uses `CloseSessionAndWait` and
+refuses to block from the target session or that user's service subtree.
+
+Scope IDs are fully qualified: their first segment identifies the explicit
+lib-scoped domain. Scope removal is single-node and nonrecursive. Moving a
+process and assigning a target are intentionally separate commands. Target
+removal only unregisters tracking. `scope watch` waits for subtree emptiness on
+the caller thread.
 
 ## PAM configuration
 
@@ -48,22 +58,10 @@ blank lines, whole-line comments, and exactly one double-quoted absolute path:
 pam_file = "/etc/pam.d/system-login"
 ```
 
-There is no command-line path override and no `.toml` filename fallback.
-Activation places the exact marked block immediately before the sole active
-session `pam_env.so` entry. Mutation uses a sidecar advisory lock, a
-same-directory temporary file, fsync, atomic rename, preserved owner/group/mode,
-and a timestamped backup. Deactivation removes only the exact marked block.
+Activation atomically places the managed block before the sole active session
+`pam_env.so` entry while preserving metadata and a timestamped backup.
 Malformed, duplicated, partially edited, or ambiguously anchored policies are
-rejected instead of repaired implicitly.
-
-The intended `/etc/security/pam_env.conf` entry is:
-
-```text
-DBUS_SESSION_BUS_ADDRESS DEFAULT="unix:path=${XDG_RUNTIME_DIR}/bus"
-```
-
-This relies on `pam_sessiond.so` running before `pam_env.so`; the user bus
-itself remains optional.
+rejected rather than repaired implicitly.
 
 ## Development
 
@@ -74,7 +72,5 @@ cargo clippy --all-targets -- -D warnings
 ./tests/pam-env.sh
 ```
 
-The D-Bus integration test uses a private bus and verifies that one unavailable
-component does not break another command group. The PAM shell test loads the
-system's real `pam_env.so` and verifies expansion after an earlier session
-module establishes `XDG_RUNTIME_DIR`.
+The integration test uses a private bus for the synchronous ACL, seat, and
+session clients and a temporary arbitrary lib-scoped domain.

@@ -7,12 +7,14 @@ pub mod pam;
 use anyhow::Result;
 use cli::{Args, Command, PamCommand};
 
-pub async fn run(args: Args) -> Result<String> {
+pub fn run(args: Args) -> Result<String> {
     match args.command {
-        Command::Seat { command } => admin::seat(command, args.timeout_seconds).await,
-        Command::Session { command } => admin::session(command).await,
-        Command::Scope { command } => admin::scope(command).await,
-        Command::Acl { command } => admin::acl(command).await,
+        Command::Seat { command } => admin::seat(command, args.timeout_seconds),
+        Command::Session { command } => admin::session(command, args.timeout_seconds),
+        Command::Scope { command } => {
+            admin::scope(command, &args.cgroup_root, args.timeout_seconds)
+        }
+        Command::Acl { command } => admin::acl(command, args.timeout_seconds),
         Command::Pam { command } => {
             let config = config::Config::load()?;
             match command {

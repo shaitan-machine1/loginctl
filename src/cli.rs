@@ -1,14 +1,17 @@
 use clap::{Parser, Subcommand};
-use scope_id::ScopeId;
+use lib_scoped::{ScopeId, TargetId};
 use seat_udev::SeatName;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Administer the decoupled login stack")]
 pub struct Args {
-    /// Timeout for udev assignment operations, in seconds.
+    /// Timeout for blocking bus, watch, and udev operations, in seconds.
     #[arg(long, default_value_t = 15)]
     pub timeout_seconds: u64,
+    /// Cgroup-v2 mount used by direct scope commands.
+    #[arg(long, default_value = "/sys/fs/cgroup")]
+    pub cgroup_root: PathBuf,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -67,7 +70,7 @@ pub enum SeatCommand {
 pub enum SessionCommand {
     /// List managed sessions.
     List,
-    /// Request asynchronous, idempotent closure of a session.
+    /// Close a session and wait for complete daemon teardown.
     Close {
         #[arg(value_parser = parse_session_id)]
         session: String,
@@ -76,13 +79,38 @@ pub enum SessionCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ScopeCommand {
-    /// List managed scopes below PREFIX (default: sessiond).
+    /// List scopes below PREFIX (default: sessiond).
     List {
         #[arg(value_parser = parse_scope)]
         prefix: Option<String>,
     },
-    /// Show the managed scope containing a process.
-    Of { pid: u32 },
+    /// Show population, identity, and target diagnostics.
+    Show {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
+    /// Show the scope containing a process in DOMAIN.
+    Of {
+        pid: u32,
+        #[arg(long, default_value = "sessiond", value_parser = parse_domain)]
+        domain: String,
+    },
+    /// Create one scope node. Its parent must already exist.
+    Create {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
+    /// Move a process without assigning a target record.
+    Move {
+        pid: u32,
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
+    /// Remove one empty scope node; never recursive.
+    Remove {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
     /// Send SIGTERM to every process below a scope.
     Terminate {
         #[arg(value_parser = parse_scope)]
@@ -92,6 +120,55 @@ pub enum ScopeCommand {
     Kill {
         #[arg(value_parser = parse_scope)]
         scope: String,
+    },
+    /// Inspect or mutate scoped target records.
+    Target {
+        #[command(subcommand)]
+        command: TargetCommand,
+    },
+    /// Block until a scope subtree becomes empty or timeout expires.
+    Watch {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TargetCommand {
+    List {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+    },
+    Show {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+        #[arg(value_parser = parse_target)]
+        target: String,
+    },
+    Assign {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+        #[arg(value_parser = parse_target)]
+        target: String,
+        pid: u32,
+    },
+    Remove {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+        #[arg(value_parser = parse_target)]
+        target: String,
+    },
+    Terminate {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+        #[arg(value_parser = parse_target)]
+        target: String,
+    },
+    Kill {
+        #[arg(value_parser = parse_scope)]
+        scope: String,
+        #[arg(value_parser = parse_target)]
+        target: String,
     },
 }
 
@@ -140,6 +217,19 @@ fn parse_scope(value: &str) -> Result<String, String> {
         .map(String::from)
         .map_err(|error| error.to_string())
 }
+fn parse_domain(value: &str) -> Result<String, String> {
+    let scope = ScopeId::parse(value).map_err(|error| error.to_string())?;
+    if scope.segments().count() == 1 {
+        Ok(value.to_owned())
+    } else {
+        Err("domain must be one portable scope segment".into())
+    }
+}
+fn parse_target(value: &str) -> Result<String, String> {
+    TargetId::parse(value)
+        .map(String::from)
+        .map_err(|error| error.to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -162,9 +252,22 @@ mod tests {
             vec!["loginctl", "session", "close", SID],
             vec!["loginctl", "scope", "list"],
             vec!["loginctl", "scope", "list", "sessiond"],
-            vec!["loginctl", "scope", "of", "123"],
+            vec!["loginctl", "scope", "show", SCOPE],
+            vec!["loginctl", "scope", "of", "123", "--domain", "sessiond"],
+            vec!["loginctl", "scope", "create", SCOPE],
+            vec!["loginctl", "scope", "move", "123", SCOPE],
+            vec!["loginctl", "scope", "remove", SCOPE],
             vec!["loginctl", "scope", "terminate", SCOPE],
             vec!["loginctl", "scope", "kill", SCOPE],
+            vec!["loginctl", "scope", "target", "list", SCOPE],
+            vec!["loginctl", "scope", "target", "show", SCOPE, "leader"],
+            vec![
+                "loginctl", "scope", "target", "assign", SCOPE, "leader", "123",
+            ],
+            vec!["loginctl", "scope", "target", "remove", SCOPE, "leader"],
+            vec!["loginctl", "scope", "target", "terminate", SCOPE, "leader"],
+            vec!["loginctl", "scope", "target", "kill", SCOPE, "leader"],
+            vec!["loginctl", "scope", "watch", SCOPE],
             vec!["loginctl", "acl", "list"],
             vec!["loginctl", "acl", "grant", SID, "1000", "seat0"],
             vec!["loginctl", "acl", "revoke", SID],
