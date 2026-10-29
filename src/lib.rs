@@ -14,7 +14,6 @@ pub fn run(args: Args) -> Result<String> {
         Command::Scope { command } => {
             admin::scope(command, &args.cgroup_root, args.timeout_seconds)
         }
-        Command::Acl { command } => admin::acl(command, args.timeout_seconds),
         Command::Pam { command } => {
             let config = config::Config::load()?;
             match command {

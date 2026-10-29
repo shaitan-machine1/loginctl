@@ -7,15 +7,15 @@ rust-version = "1.89"
 description = "Unified administration for the decoupled login stack"
 
 [dependencies]
-aclad-api = { path = "../aclad/crates/aclad-api" }
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 dbus = "0.9.12"
+uuid = "1"
 libc = "0.2.191"
 lib-scoped = { path = "../sessiond/crates/lib-scoped" }
 lib-sessiond = { path = "../sessiond/crates/lib-sessiond" }
-multiseat-api = { path = "../multiseat/crates/multiseat-api" }
-seat-udev = { git = "ssh://git@github.com/shaitan-machine1/seat-udev.git", rev = "00126146f8e1ba1417ed4ec31541a079cff57f47", version = "=0.1.0", features = ["assign"] }
+lib-multiseatd = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.0" }
+seat-udev = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.0", features = ["assign"] }
 
 [dev-dependencies]
 dbus-crossroads = "0.5.3"

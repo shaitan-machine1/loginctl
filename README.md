@@ -2,7 +2,7 @@
 
 Synchronous administrator for the decoupled login stack. It has no async
 runtime. Session inventory and scope operations call `lib-sessiond` and
-`lib-scoped` directly; daemon-backed seat/ACL/session-close calls use blocking
+`lib-scoped` directly; daemon-backed seat/session-close calls use blocking
 clients owned by the corresponding API crates. A missing component does not
 break unrelated command groups.
 
@@ -13,7 +13,12 @@ mutating sessiond-owned scopes can be disruptive.
 ## Commands
 
 ```text
-loginctl seat list|status|refresh|assign|unassign|flush
+loginctl seat list|status
+loginctl seat client list [SEAT]
+loginctl seat client revoke CLIENT
+loginctl seat assign DEVICE SEAT
+loginctl seat unassign DEVICE
+loginctl seat flush
 loginctl session list
 loginctl session close SESSION
 
@@ -33,7 +38,6 @@ loginctl scope target terminate SCOPE TARGET
 loginctl scope target kill SCOPE TARGET
 loginctl scope watch SCOPE
 
-loginctl acl list|grant|revoke
 loginctl pam status|activate|deactivate
 ```
 
@@ -49,6 +53,13 @@ process and assigning a target are intentionally separate commands. Target
 removal only unregisters tracking. `scope watch` waits for subtree emptiness on
 the caller thread.
 
+Seat topology is reconciled continuously by multiseatd; there is no explicit
+refresh command. Status separates udev topology, brokered devices, direct-access
+devices, static direct-access nodes and persistent assignments. Client IDs are
+opaque UUIDv7 leases: revoking one revokes seat access, not a process.
+`seat flush` removes persistent assignment rules only; it does not flush daemon
+runtime state, revoke clients or clear ACLs. There is no `acl` command group.
+
 ## PAM configuration
 
 `loginctl pam` reads only `/etc/loginctl.conf`. The strict grammar permits
@@ -61,7 +72,10 @@ pam_file = "/etc/pam.d/system-login"
 Activation atomically places the managed block before the sole active session
 `pam_env.so` entry while preserving metadata and a timestamped backup.
 Malformed, duplicated, partially edited, or ambiguously anchored policies are
-rejected rather than repaired implicitly.
+rejected rather than repaired implicitly. The managed block and diagnostics
+contain only `pam_sessiond.so`. Activation can migrate the exact historical
+loginctl-owned two-module block to the sessiond-only block; unrelated PAM ACL
+entries are neither detected nor managed.
 
 ## Development
 
@@ -72,5 +86,5 @@ cargo clippy --all-targets -- -D warnings
 ./tests/pam-env.sh
 ```
 
-The integration test uses a private bus for the synchronous ACL, seat, and
-session clients and a temporary arbitrary lib-scoped domain.
+The integration test uses a private bus for the synchronous seat and session
+clients and a temporary arbitrary lib-scoped domain.

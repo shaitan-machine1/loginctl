@@ -3,7 +3,9 @@ use dbus::channel::MatchingReceiver;
 use dbus::message::MatchRule;
 use dbus_crossroads::Crossroads;
 use loginctl::admin;
-use loginctl::cli::{AclCommand, ScopeCommand, SeatCommand, SessionCommand};
+use loginctl::cli::{ClientCommand, ScopeCommand, SeatCommand, SessionCommand};
+const CLIENT_ID: &str = "01900000-0000-7000-8000-000000000000";
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,11 +52,7 @@ struct Server {
 impl Server {
     fn start() -> Self {
         let connection = Connection::new_system().unwrap();
-        for name in [
-            lib_sessiond::bus::BUS_NAME,
-            multiseat_api::BUS_NAME,
-            aclad_api::BUS_NAME,
-        ] {
+        for name in [lib_sessiond::bus::BUS_NAME, libmultiseatd::BUS_NAME] {
             connection.request_name(name, false, false, true).unwrap();
         }
         let mut crossroads = Crossroads::new();
@@ -72,42 +70,50 @@ impl Server {
                 )],))
             });
         });
-        let seats = crossroads.register(multiseat_api::INTERFACE_NAME, |builder| {
+        let seats = crossroads.register(libmultiseatd::INTERFACE_NAME, |builder| {
             builder.method("ListSeats", (), ("seats",), |_, _, ()| {
                 Ok((vec!["seat0".to_owned()],))
             });
             builder.method(
-                "PreviewRefresh",
-                ("seat",),
-                ("changes",),
-                |_, _, (_seat,): (String,)| Ok((Vec::<multiseat_api::RefreshDescription>::new(),)),
+                "CreateClient",
+                ("seat", "uid"),
+                ("client_id", "fd"),
+                |_, _, (seat, uid): (String, u32)| {
+                    assert_eq!((seat.as_str(), uid), ("seat0", 1000));
+                    let (fd, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+                    // SAFETY: transfer the descriptor to the D-Bus value once.
+                    let fd = unsafe { dbus::arg::OwnedFd::new(fd.into_raw_fd()) };
+                    Ok((CLIENT_ID.to_owned(), fd))
+                },
             );
             builder.method(
-                "Refresh",
-                ("seat", "confirmed"),
-                ("seats",),
-                |_, _, (_seat, _): (String, bool)| Ok((Vec::<String>::new(),)),
-            );
-        });
-        let acls = crossroads.register(aclad_api::INTERFACE_NAME, |builder| {
-            builder.method("ListGrants", (), ("grants",), |_, _, ()| {
-                Ok((vec![(
-                    "0123456789abcdef0123456789abcdef".to_owned(),
-                    1000u32,
-                    "seat0".to_owned(),
-                )],))
-            });
-            builder.method(
-                "Grant",
-                ("sid", "uid", "seat"),
+                "RevokeClient",
+                ("client_id",),
                 (),
-                |_, _, (_sid, _uid, _seat): (String, u32, String)| Ok(()),
+                |_, _, (id,): (String,)| {
+                    assert_eq!(id, CLIENT_ID);
+                    Ok(())
+                },
             );
-            builder.method("Revoke", ("sid",), (), |_, _, (_sid,): (String,)| Ok(()));
+            builder.method("ListClients", (), ("clients",), |_, _, ()| {
+                Ok((vec![
+                    (
+                        CLIENT_ID.to_owned(),
+                        "seat0".to_owned(),
+                        1000u32,
+                        "active".to_owned(),
+                    ),
+                    (
+                        "01900000-0000-7000-8000-000000000001".to_owned(),
+                        "seat1".to_owned(),
+                        1001u32,
+                        "connected".to_owned(),
+                    ),
+                ],))
+            });
         });
         crossroads.insert(lib_sessiond::bus::OBJECT_PATH, &[session], ());
-        crossroads.insert(multiseat_api::OBJECT_PATH, &[seats], ());
-        crossroads.insert(aclad_api::OBJECT_PATH, &[acls], ());
+        crossroads.insert(libmultiseatd::OBJECT_PATH, &[seats], ());
         connection.start_receive(
             MatchRule::new_method_call(),
             Box::new(move |message, connection| {
@@ -140,36 +146,45 @@ fn commands_use_synchronous_component_clients_and_direct_scopes() {
     let _bus = PrivateBus::start();
     let server = Server::start();
     assert_eq!(admin::seat(SeatCommand::List, 15).unwrap(), "SEAT\nseat0\n");
-    assert_eq!(
-        admin::seat(
-            SeatCommand::Refresh {
-                seat: None,
-                force: true
+    let client = libmultiseatd::Client::system(Duration::from_secs(2)).unwrap();
+    let (id, fd) = client.create_client("seat0", 1000).unwrap();
+    assert_eq!(id, CLIENT_ID);
+    // SAFETY: fd is live for the duration of this fcntl call.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    drop(fd);
+    client.revoke_client(&id).unwrap();
+    let all = admin::seat(
+        SeatCommand::Client {
+            command: ClientCommand::List { seat: None },
+        },
+        15,
+    )
+    .unwrap();
+    assert!(all.contains("seat0"));
+    assert!(all.contains("seat1"));
+    let selected = admin::seat(
+        SeatCommand::Client {
+            command: ClientCommand::List {
+                seat: Some(seat_udev::SeatName::seat0()),
             },
-            15
-        )
-        .unwrap(),
-        "No seat configuration changes.\n"
-    );
-    assert!(admin::acl(AclCommand::List, 15).unwrap().contains("seat0"));
-    assert!(admin::acl(
-        AclCommand::Grant {
-            session: "0123456789abcdef0123456789abcdef".into(),
-            uid: 1000,
-            seat: seat_udev::SeatName::parse("seat0").unwrap()
         },
-        15
+        15,
     )
-    .unwrap()
-    .contains("Granted session"));
-    assert!(admin::acl(
-        AclCommand::Revoke {
-            session: "0123456789abcdef0123456789abcdef".into()
+    .unwrap();
+    assert!(selected.contains("seat0"));
+    assert!(!selected.contains("seat1"));
+    let revoked = admin::seat(
+        SeatCommand::Client {
+            command: ClientCommand::Revoke {
+                client: CLIENT_ID.into(),
+            },
         },
-        15
+        15,
     )
-    .unwrap()
-    .contains("Revoked session"));
+    .unwrap();
+    assert_eq!(revoked, format!("Revoked seat client {CLIENT_ID}.\n"));
+    assert!(!revoked.contains("kill"));
     assert!(admin::session(
         SessionCommand::Close {
             session: "0123456789abcdef0123456789abcdef".into()
@@ -180,8 +195,8 @@ fn commands_use_synchronous_component_clients_and_direct_scopes() {
     .contains("Closed session"));
     drop(server);
 
-    let unavailable = admin::acl(AclCommand::List, 1).unwrap_err();
-    assert!(format!("{unavailable:#}").contains("aclad service is unavailable"));
+    let unavailable = admin::seat(SeatCommand::List, 1).unwrap_err();
+    assert!(format!("{unavailable:#}").contains("multiseatd service is unavailable"));
 
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("test")).unwrap();

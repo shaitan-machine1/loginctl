@@ -1,16 +1,14 @@
-use crate::cli::{AclCommand, ScopeCommand, SeatCommand, SessionCommand, TargetCommand};
+use crate::cli::{ClientCommand, ScopeCommand, SeatCommand, SessionCommand, TargetCommand};
 use crate::output;
-use aclad_api::Client as AcladClient;
 use anyhow::{anyhow, Context, Result};
 use lib_scoped::{Domain, ScopeId, TargetId, TargetStatus};
 use lib_sessiond::bus::Client as SessiondClient;
 use lib_sessiond::config::Config as SessionConfig;
 use lib_sessiond::SessionCore;
-use multiseat_api::Client as MultiseatClient;
+use libmultiseatd::Client as MultiseatClient;
 use seat_udev::assign::{Assigner, AssignmentGroup, RealAssignmentBackend};
 use seat_udev::{Context as UdevContext, Filter};
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,11 +25,34 @@ pub fn seat(command: SeatCommand, timeout_seconds: u64) -> Result<String> {
             Ok(output::seats(&seats))
         }
         SeatCommand::Status => seat_status(timeout_seconds),
-        SeatCommand::Refresh { seat, force } => refresh(
-            seat.as_ref().map_or("", seat_udev::SeatName::as_str),
-            force,
-            timeout_seconds,
-        ),
+        SeatCommand::Client { command } => {
+            let client = MultiseatClient::system(timeout(timeout_seconds))
+                .context("connect to the system bus for multiseatd")?;
+            match command {
+                ClientCommand::List { seat } => {
+                    let clients = service_call(
+                        "multiseatd",
+                        client.list_clients(),
+                        "call multiseatd ListClients",
+                    )?;
+                    let clients = clients
+                        .into_iter()
+                        .filter(|(_, owner, _, _)| {
+                            seat.as_ref().is_none_or(|seat| seat.as_str() == owner)
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(output::clients(&clients))
+                }
+                ClientCommand::Revoke { client: id } => {
+                    service_call(
+                        "multiseatd",
+                        client.revoke_client(&id),
+                        "call multiseatd RevokeClient",
+                    )?;
+                    Ok(format!("Revoked seat client {id}.\n"))
+                }
+            }
+        }
         SeatCommand::Assign { device, seat } => {
             let group = assigner(timeout_seconds)
                 .assign(&device, &seat)
@@ -260,81 +281,6 @@ fn create_domain(cgroup_root: &Path, scope: &ScopeId) -> Result<Domain> {
     Ok(Domain::create(cgroup_root, domain_name(scope))?)
 }
 
-pub fn acl(command: AclCommand, timeout_seconds: u64) -> Result<String> {
-    let client = AcladClient::system(timeout(timeout_seconds))
-        .context("connect to the system bus for aclad")?;
-    match command {
-        AclCommand::List => Ok(output::grants(&service_call(
-            "aclad",
-            client.list_grants(),
-            "call aclad ListGrants",
-        )?)),
-        AclCommand::Grant { session, uid, seat } => {
-            service_call(
-                "aclad",
-                client.grant(&session, uid, seat.as_str()),
-                &format!("call aclad Grant for session {session}, uid {uid}, seat {seat}"),
-            )?;
-            Ok(format!(
-                "Granted session {session} to uid {uid} on seat {seat}.\n"
-            ))
-        }
-        AclCommand::Revoke { session } => {
-            service_call(
-                "aclad",
-                client.revoke(&session),
-                &format!("call aclad Revoke for session {session}"),
-            )?;
-            Ok(format!("Revoked session {session}.\n"))
-        }
-    }
-}
-fn refresh(seat: &str, force: bool, timeout_seconds: u64) -> Result<String> {
-    let client = MultiseatClient::system(timeout(timeout_seconds))
-        .context("connect to the system bus for multiseatd")?;
-    let changes = service_call(
-        "multiseatd",
-        client.preview_refresh(seat),
-        &format_refresh_context("PreviewRefresh", seat),
-    )?;
-    if changes.is_empty() {
-        return Ok(output::refresh_preview(&changes));
-    }
-    print!("{}", output::refresh_preview(&changes));
-    print_known_sessions();
-    eprintln!(
-        "WARNING: configured devices are seatd allowlists, not devices currently open by clients."
-    );
-    eprintln!("WARNING: refreshing these seats may terminate graphical sessions.");
-    if !force && !confirm()? {
-        return Err(anyhow!("refresh cancelled"));
-    }
-    let completed = service_call(
-        "multiseatd",
-        client.refresh(seat, true),
-        &format_refresh_context("Refresh", seat),
-    )?;
-    let mut result = String::new();
-    for seat in completed {
-        writeln!(result, "refreshed {seat}").expect("writing to String cannot fail");
-    }
-    Ok(result)
-}
-fn print_known_sessions() {
-    let Ok(core) = session_core() else {
-        return;
-    };
-    let Ok(sessions) = core.list_sessions() else {
-        return;
-    };
-    if sessions.is_empty() {
-        return;
-    }
-    eprintln!("Known sessions (sessiond cannot yet map these precisely to seats):");
-    for session in sessions {
-        eprintln!("  {} uid={}", session.id, session.uid);
-    }
-}
 fn session_core() -> Result<SessionCore> {
     let path = Path::new("/etc/sessiond.conf");
     let config = if path.exists() {
@@ -371,25 +317,9 @@ fn seat_status(timeout_seconds: u64) -> Result<String> {
     let context = UdevContext::new().context("read udev seat topology")?;
     let mut output = "seats:\n".to_owned();
     for seat in context.seats() {
-        writeln!(output, "  {seat}").expect("writing to String cannot fail");
-        for device in context.devices(&seat, Filter::All) {
-            writeln!(
-                output,
-                "    {}{}{}",
-                device
-                    .devnode
-                    .as_deref()
-                    .unwrap_or(&device.syspath)
-                    .display(),
-                if device.master_of_seat {
-                    " [master]"
-                } else {
-                    ""
-                },
-                if device.uaccess { " [uaccess]" } else { "" }
-            )
-            .expect("String write");
-        }
+        let devices = context.devices(&seat, Filter::All);
+        let static_nodes = context.static_direct_access_nodes(&seat)?;
+        output.push_str(&output::seat_topology(&seat, &devices, &static_nodes));
     }
     output.push_str("persistent assignments:\n");
     for assignment in assigner
@@ -420,13 +350,6 @@ fn format_group(action: &str, group: &AssignmentGroup) -> String {
     }
     output
 }
-fn format_refresh_context(method: &str, seat: &str) -> String {
-    if seat.is_empty() {
-        format!("call multiseatd {method} for all changed seats")
-    } else {
-        format!("call multiseatd {method} for {seat}")
-    }
-}
 fn service_call<T>(
     component: &str,
     result: std::result::Result<T, dbus::Error>,
@@ -452,13 +375,6 @@ fn service_call<T>(
         })
         .with_context(|| context.to_owned())
 }
-fn confirm() -> io::Result<bool> {
-    eprint!("Continue? [y/N] ");
-    io::stderr().flush()?;
-    let mut response = String::new();
-    io::stdin().read_line(&mut response)?;
-    Ok(matches!(response.trim(), "y" | "Y" | "yes" | "YES"))
-}
 
 #[cfg(test)]
 mod tests {
@@ -473,16 +389,5 @@ mod tests {
         );
         assert!(rendered.contains("call sessiond ListSessions"));
         assert!(rendered.contains("sessiond service is unavailable"));
-    }
-    #[test]
-    fn formats_refresh_context_for_one_or_all_seats() {
-        assert_eq!(
-            format_refresh_context("Refresh", ""),
-            "call multiseatd Refresh for all changed seats"
-        );
-        assert_eq!(
-            format_refresh_context("Refresh", "seat1"),
-            "call multiseatd Refresh for seat1"
-        );
     }
 }

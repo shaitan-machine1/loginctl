@@ -33,11 +33,6 @@ pub enum Command {
         #[command(subcommand)]
         command: ScopeCommand,
     },
-    /// Inspect and administer device ACL grants.
-    Acl {
-        #[command(subcommand)]
-        command: AclCommand,
-    },
     /// Inspect or change PAM integration.
     Pam {
         #[command(subcommand)]
@@ -51,12 +46,10 @@ pub enum SeatCommand {
     List,
     /// Show udev seats, devices, and persistent assignments.
     Status,
-    /// Preview and explicitly refresh changed seatd allowlists.
-    Refresh {
-        seat: Option<SeatName>,
-        /// Skip the interactive destructive-operation confirmation.
-        #[arg(long)]
-        force: bool,
+    /// Inspect or revoke opaque seat client leases (not processes).
+    Client {
+        #[command(subcommand)]
+        command: ClientCommand,
     },
     /// Assign a complete ID_FOR_SEAT device group to a seat.
     Assign { device: PathBuf, seat: SeatName },
@@ -64,6 +57,30 @@ pub enum SeatCommand {
     Unassign { device: PathBuf },
     /// Remove every managed persistent assignment.
     Flush,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClientCommand {
+    /// List live seat clients, optionally restricted to one seat.
+    List { seat: Option<SeatName> },
+    /// Revoke a seat client; this does not kill a process.
+    Revoke {
+        #[arg(value_parser = parse_client_id)]
+        client: String,
+    },
+}
+
+pub fn parse_client_id(value: &str) -> Result<String, String> {
+    match uuid::Uuid::parse_str(value) {
+        Ok(id)
+            if id.to_string() == value
+                && id.get_version_num() == 7
+                && id.get_variant() == uuid::Variant::RFC4122 =>
+        {
+            Ok(value.to_owned())
+        }
+        _ => Err("client ID must be a canonical UUIDv7".into()),
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -173,24 +190,6 @@ pub enum TargetCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum AclCommand {
-    /// List active device ACL grants.
-    List,
-    /// Grant one user access to one seat for a session.
-    Grant {
-        #[arg(value_parser = parse_session_id)]
-        session: String,
-        uid: u32,
-        seat: SeatName,
-    },
-    /// Revoke a session's device ACL grant.
-    Revoke {
-        #[arg(value_parser = parse_session_id)]
-        session: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum PamCommand {
     /// Report PAM integration status.
     Status,
@@ -244,7 +243,15 @@ mod tests {
         for args in [
             vec!["loginctl", "seat", "list"],
             vec!["loginctl", "seat", "status"],
-            vec!["loginctl", "seat", "refresh", "seat0", "--force"],
+            vec!["loginctl", "seat", "client", "list"],
+            vec!["loginctl", "seat", "client", "list", "seat0"],
+            vec![
+                "loginctl",
+                "seat",
+                "client",
+                "revoke",
+                "01900000-0000-7000-8000-000000000000",
+            ],
             vec!["loginctl", "seat", "assign", "/dev/dri/card0", "seat1"],
             vec!["loginctl", "seat", "unassign", "/dev/dri/card0"],
             vec!["loginctl", "seat", "flush"],
@@ -268,9 +275,6 @@ mod tests {
             vec!["loginctl", "scope", "target", "terminate", SCOPE, "leader"],
             vec!["loginctl", "scope", "target", "kill", SCOPE, "leader"],
             vec!["loginctl", "scope", "watch", SCOPE],
-            vec!["loginctl", "acl", "list"],
-            vec!["loginctl", "acl", "grant", SID, "1000", "seat0"],
-            vec!["loginctl", "acl", "revoke", SID],
             vec!["loginctl", "pam", "status"],
             vec!["loginctl", "pam", "activate"],
             vec!["loginctl", "pam", "deactivate"],
@@ -289,8 +293,17 @@ mod tests {
             .expect_err("invalid scope is rejected");
         assert_eq!(scope.kind(), ErrorKind::ValueValidation);
 
-        let seat = Args::try_parse_from(["loginctl", "acl", "grant", SID, "1000", "not/a/seat"])
+        let seat = Args::try_parse_from(["loginctl", "seat", "assign", "/dev/null", "not/a/seat"])
             .expect_err("invalid seat is rejected");
         assert_eq!(seat.kind(), ErrorKind::ValueValidation);
+        assert!(Args::try_parse_from(["loginctl", "seat", "refresh"]).is_err());
+        assert!(Args::try_parse_from(["loginctl", "acl", "status"]).is_err());
+        for id in [
+            "bad",
+            "01900000-0000-4000-8000-000000000000",
+            "01900000-0000-7000-C000-000000000000",
+        ] {
+            assert!(Args::try_parse_from(["loginctl", "seat", "client", "revoke", id]).is_err());
+        }
     }
 }

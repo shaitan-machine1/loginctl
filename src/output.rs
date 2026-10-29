@@ -1,7 +1,8 @@
-use aclad_api::GrantDescription;
 use lib_sessiond::Session;
-use multiseat_api::RefreshDescription;
+use libmultiseatd::ClientRow;
+use seat_udev::{SeatDevice, SeatName};
 use std::fmt::Write;
+use std::path::PathBuf;
 
 pub fn seats(seats: &[String]) -> String {
     if seats.is_empty() {
@@ -72,63 +73,58 @@ pub fn scope_of(pid: u32, scope: &str) -> String {
     format!("{:>pid_width$}  SCOPE\n{pid:>pid_width$}  {scope}\n", "PID")
 }
 
-pub fn grants(grants: &[GrantDescription]) -> String {
-    if grants.is_empty() {
-        return "No grants.\n".to_owned();
+pub fn clients(clients: &[ClientRow]) -> String {
+    if clients.is_empty() {
+        return "No seat clients.\n".into();
     }
-    let session_width = grants
-        .iter()
-        .map(|(sid, _, _)| sid.len())
-        .chain(["SESSION".len()])
-        .max()
-        .expect("heading provides a width");
-    let uid_width = grants
-        .iter()
-        .map(|(_, uid, _)| uid.to_string().len())
-        .chain(["UID".len()])
-        .max()
-        .expect("heading provides a width");
-    let mut output = String::new();
-    writeln!(
-        output,
-        "{:<session_width$}  {:>uid_width$}  SEAT",
-        "SESSION", "UID"
-    )
-    .expect("writing to String cannot fail");
-    for (sid, uid, seat) in grants {
-        writeln!(output, "{sid:<session_width$}  {uid:>uid_width$}  {seat}")
-            .expect("writing to String cannot fail");
+    let mut output = "CLIENT  SEAT  UID  STATE\n".to_owned();
+    for (id, seat, uid, state) in clients {
+        writeln!(output, "{id}  {seat}  {uid}  {state}").expect("String write");
     }
     output
 }
 
-pub fn refresh_preview(changes: &[RefreshDescription]) -> String {
-    if changes.is_empty() {
-        return "No seat configuration changes.\n".to_owned();
+pub fn seat_topology(seat: &SeatName, devices: &[SeatDevice], static_nodes: &[PathBuf]) -> String {
+    let mut output = format!("  {seat}\n    udev topology:\n");
+    for device in devices {
+        writeln!(
+            output,
+            "      {}{}{}",
+            device
+                .devnode
+                .as_deref()
+                .unwrap_or(&device.syspath)
+                .display(),
+            if device.master_of_seat {
+                " [master]"
+            } else {
+                ""
+            },
+            if device.uaccess { " [uaccess]" } else { "" }
+        )
+        .expect("String write");
     }
-    let mut output = String::new();
-    for (seat, action, old, new) in changes {
-        writeln!(output, "{seat}: {action}").expect("writing to String cannot fail");
+    output.push_str("    brokered devices:\n");
+    for device in devices.iter().filter(|device| device.brokerable()) {
         writeln!(
             output,
-            "  old allowlist: {}",
-            if old.is_empty() {
-                "(empty)".to_owned()
-            } else {
-                old.join(", ")
-            }
+            "      {}",
+            device.devnode.as_ref().unwrap().display()
         )
-        .expect("writing to String cannot fail");
+        .expect("String write");
+    }
+    output.push_str("    direct-access devices:\n");
+    for device in devices.iter().filter(|device| device.direct_access()) {
         writeln!(
             output,
-            "  new allowlist: {}",
-            if new.is_empty() {
-                "(empty)".to_owned()
-            } else {
-                new.join(", ")
-            }
+            "      {}",
+            device.devnode.as_ref().unwrap().display()
         )
-        .expect("writing to String cannot fail");
+        .expect("String write");
+    }
+    output.push_str("    static direct-access nodes:\n");
+    for path in static_nodes {
+        writeln!(output, "      {}", path.display()).expect("String write");
     }
     output
 }
@@ -145,12 +141,11 @@ mod tests {
         assert_eq!(seats(&[]), "No seats.\n");
         assert_eq!(sessions(&[]), "No sessions.\n");
         assert_eq!(scopes(&[]), "No matching scopes.\n");
-        assert_eq!(grants(&[]), "No grants.\n");
-        assert_eq!(refresh_preview(&[]), "No seat configuration changes.\n");
+        assert_eq!(clients(&[]), "No seat clients.\n");
     }
 
     #[test]
-    fn renders_aligned_session_and_grant_tables_without_reordering() {
+    fn renders_aligned_session_table_without_reordering() {
         assert_eq!(
             sessions(&[
                 Session {
@@ -173,30 +168,41 @@ mod tests {
                 "0123456789abcdef0123456789abcdef  1000  42  99\n",
             )
         );
+    }
+
+    #[test]
+    fn renders_scope_lookup_and_clients_without_process_kill_language() {
+        assert_eq!(scope_of(99, ""), "PID 99 is not in a managed scope.\n");
         assert_eq!(
-            grants(&[
-                (B.to_owned(), 7, "seat-long".to_owned()),
-                (A.to_owned(), 1000, "seat0".to_owned()),
-            ]),
-            concat!(
-                "SESSION                            UID  SEAT\n",
-                "1123456789abcdef0123456789abcdef     7  seat-long\n",
-                "0123456789abcdef0123456789abcdef  1000  seat0\n",
-            )
+            clients(&[(
+                "opaque-id".into(),
+                "seat0".into(),
+                1000,
+                "pending-disable".into()
+            )]),
+            "CLIENT  SEAT  UID  STATE\nopaque-id  seat0  1000  pending-disable\n"
         );
     }
 
     #[test]
-    fn renders_scope_lookup_and_refresh_preview() {
-        assert_eq!(scope_of(99, ""), "PID 99 is not in a managed scope.\n");
-        assert_eq!(
-            refresh_preview(&[(
-                "seat0".to_owned(),
-                "replace".to_owned(),
-                vec!["/dev/a".to_owned()],
-                vec![],
-            )]),
-            "seat0: replace\n  old allowlist: /dev/a\n  new allowlist: (empty)\n"
-        );
+    fn topology_separates_brokered_direct_and_static_nodes() {
+        let seat = SeatName::seat0();
+        let mut direct = SeatDevice {
+            syspath: "/sys/audio".into(),
+            devnode: Some("/dev/audio".into()),
+            devnum: None,
+            seat: seat.clone(),
+            kind: seat_udev::DeviceKind::Other,
+            uaccess: true,
+            master_of_seat: false,
+        };
+        let mut brokered = direct.clone();
+        brokered.kind = seat_udev::DeviceKind::Evdev;
+        brokered.devnode = Some("/dev/input/event0".into());
+        direct.master_of_seat = true;
+        let rendered = seat_topology(&seat, &[direct, brokered], &["/dev/static".into()]);
+        assert!(rendered.contains("brokered devices:\n      /dev/input/event0\n    direct-access devices:\n      /dev/audio\n"));
+        assert!(rendered.contains("static direct-access nodes:\n      /dev/static"));
+        assert!(rendered.contains("udev topology:"));
     }
 }

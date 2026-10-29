@@ -12,11 +12,15 @@ const END: &str = "# END decoupling-loginctl";
 pub const MANAGED_BLOCK: &str = concat!(
     "# BEGIN decoupling-loginctl\n",
     "-session    optional    pam_sessiond.so timeout=30s\n",
+    "# END decoupling-loginctl\n",
+);
+const LEGACY_BLOCK: &str = concat!(
+    "# BEGIN decoupling-loginctl\n",
+    "-session    optional    pam_sessiond.so timeout=30s\n",
     "-session    optional    pam_aclad.so timeout=30s\n",
     "# END decoupling-loginctl\n",
 );
 const SESSIOND_MODULE: &str = "/usr/lib/security/pam_sessiond.so";
-const ACLAD_MODULE: &str = "/usr/lib/security/pam_aclad.so";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockState {
@@ -42,11 +46,9 @@ pub struct Status {
     pub target: PathBuf,
     pub state: BlockState,
     pub sessiond_entries: usize,
-    pub aclad_entries: usize,
     pub env_anchors: usize,
     pub modules_before_env: bool,
     pub sessiond_module_exists: bool,
-    pub aclad_module_exists: bool,
     detail: Option<String>,
 }
 
@@ -64,22 +66,17 @@ impl Status {
                 "PAM file: {}\n",
                 "Managed block: {}\n",
                 "pam_sessiond.so entries: {}\n",
-                "pam_aclad.so entries: {}\n",
                 "session pam_env.so anchors: {}\n",
                 "Module ordering: {}\n",
-                "{}: {}\n",
                 "{}: {}\n"
             ),
             self.target.display(),
             self.state.label(),
             self.sessiond_entries,
-            self.aclad_entries,
             self.env_anchors,
             ordering,
             SESSIOND_MODULE,
             exists_label(self.sessiond_module_exists),
-            ACLAD_MODULE,
-            exists_label(self.aclad_module_exists),
         );
         if let Some(detail) = &self.detail {
             output.push_str("Detail: ");
@@ -96,12 +93,11 @@ struct Analysis {
     block_range: Option<(usize, usize)>,
     anchors: Vec<(usize, usize)>,
     sessiond_entries: Vec<usize>,
-    aclad_entries: Vec<usize>,
     detail: Option<String>,
 }
 
 pub fn status(path: &Path) -> Result<Status> {
-    status_from(path, Path::new(SESSIOND_MODULE), Path::new(ACLAD_MODULE))
+    status_from(path, Path::new(SESSIOND_MODULE))
 }
 
 pub fn activate(path: &Path) -> Result<String> {
@@ -114,28 +110,24 @@ pub fn deactivate(path: &Path) -> Result<String> {
     deactivate_impl(path)
 }
 
-fn status_from(path: &Path, sessiond_module: &Path, aclad_module: &Path) -> Result<Status> {
+fn status_from(path: &Path, sessiond_module: &Path) -> Result<Status> {
     let (contents, _) = read_target(path)?;
     let analysis = analyze(&contents);
     let env_start = analysis.anchors.first().map(|anchor| anchor.0);
     let modules_before_env = env_start.is_some_and(|anchor| {
         !analysis.sessiond_entries.is_empty()
-            && !analysis.aclad_entries.is_empty()
             && analysis
                 .sessiond_entries
                 .iter()
-                .chain(&analysis.aclad_entries)
                 .all(|offset| *offset < anchor)
     });
     Ok(Status {
         target: path.to_owned(),
         state: analysis.state,
         sessiond_entries: analysis.sessiond_entries.len(),
-        aclad_entries: analysis.aclad_entries.len(),
         env_anchors: analysis.anchors.len(),
         modules_before_env,
         sessiond_module_exists: sessiond_module.is_file(),
-        aclad_module_exists: aclad_module.is_file(),
         detail: analysis.detail,
     })
 }
@@ -161,6 +153,20 @@ fn activate_impl(path: &Path) -> Result<String> {
                     "refusing to activate: expected one session pam_env.so anchor, found {}",
                     analysis.anchors.len()
                 );
+            }
+            let (start, end) = analysis.block_range.expect("active block has a range");
+            if &contents[start..end] == LEGACY_BLOCK {
+                let mut updated = String::with_capacity(contents.len());
+                updated.push_str(&contents[..start]);
+                updated.push_str(MANAGED_BLOCK);
+                updated.push_str(&contents[end..]);
+                let backup = backup(path, contents.as_bytes(), &metadata)?;
+                atomic_replace(path, updated.as_bytes(), &metadata)?;
+                return Ok(format!(
+                    "Updated PAM integration in {}.\nBackup: {}\n",
+                    path.display(),
+                    backup.display()
+                ));
             }
             return Ok(format!(
                 "PAM integration is already active in {}.\n",
@@ -227,7 +233,6 @@ fn deactivate_impl(path: &Path) -> Result<String> {
 fn analyze(contents: &str) -> Analysis {
     let mut anchors = Vec::new();
     let mut sessiond_entries = Vec::new();
-    let mut aclad_entries = Vec::new();
     let mut exact_markers = 0;
     let mut marker_like = 0;
     let mut offset = 0;
@@ -243,15 +248,15 @@ fn analyze(contents: &str) -> Analysis {
             match module {
                 "pam_env.so" => anchors.push((offset, offset + line.len())),
                 "pam_sessiond.so" => sessiond_entries.push(offset),
-                "pam_aclad.so" => aclad_entries.push(offset),
                 _ => {}
             }
         }
         offset += line.len();
     }
 
-    let blocks = contents
-        .match_indices(MANAGED_BLOCK)
+    let blocks = [MANAGED_BLOCK, LEGACY_BLOCK]
+        .into_iter()
+        .flat_map(|block| contents.match_indices(block))
         .map(|(start, block)| (start, start + block.len()))
         .collect::<Vec<_>>();
     if marker_like == 0 {
@@ -260,7 +265,6 @@ fn analyze(contents: &str) -> Analysis {
             block_range: None,
             anchors,
             sessiond_entries,
-            aclad_entries,
             detail: None,
         };
     }
@@ -275,7 +279,6 @@ fn analyze(contents: &str) -> Analysis {
             block_range: None,
             anchors,
             sessiond_entries,
-            aclad_entries,
             detail: Some(detail.to_owned()),
         };
     }
@@ -291,7 +294,6 @@ fn analyze(contents: &str) -> Analysis {
         block_range: Some(block_range),
         anchors,
         sessiond_entries,
-        aclad_entries,
         detail: (!correctly_placed).then(|| {
             "exact managed block is not immediately before the sole pam_env anchor".into()
         }),
@@ -632,17 +634,33 @@ mod tests {
         let (directory, path) = fixture(&active);
         let sessiond = directory.path().join("pam_sessiond.so");
         std::fs::write(&sessiond, "").unwrap();
-        let status = status_from(&path, &sessiond, &directory.path().join("missing.so")).unwrap();
+        let status = status_from(&path, &sessiond).unwrap();
         assert_eq!(status.state, BlockState::Active);
         assert_eq!(status.sessiond_entries, 1);
-        assert_eq!(status.aclad_entries, 1);
         assert_eq!(status.env_anchors, 1);
         assert!(status.modules_before_env);
         assert!(status.sessiond_module_exists);
-        assert!(!status.aclad_module_exists);
         let rendered = status.render();
         assert!(rendered.contains("Managed block: active"));
         assert!(rendered.contains("Module ordering: before pam_env"));
+        assert!(!rendered.contains("aclad"));
+    }
+
+    #[test]
+    fn activation_migrates_the_exact_legacy_block() {
+        let legacy = BASE.replace(
+            "session required pam_env.so\n",
+            &format!("{LEGACY_BLOCK}session required pam_env.so\n"),
+        );
+        let (directory, path) = fixture(&legacy);
+        assert!(activate_fixture(&path)
+            .unwrap()
+            .contains("Updated PAM integration"));
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert!(updated.contains(MANAGED_BLOCK));
+        assert!(!updated.contains("pam_aclad.so"));
+        assert_eq!(backup_count(&directory), 1);
+        assert!(activate_fixture(&path).unwrap().contains("already active"));
     }
 
     #[test]

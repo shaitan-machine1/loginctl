@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "aclad-api"
-version = "0.1.0"
-dependencies = [
- "dbus",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -64,6 +57,12 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bitflags"
@@ -275,6 +274,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib-multiseatd"
+version = "0.1.0"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.0#a78f8a688701ca3262690eaa59f4542bed3d8b62"
+dependencies = [
+ "dbus",
+]
+
+[[package]]
 name = "lib-scoped"
 version = "0.1.0"
 dependencies = [
@@ -335,24 +342,26 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "loginctl"
 version = "0.1.0"
 dependencies = [
- "aclad-api",
  "anyhow",
  "clap",
  "dbus",
  "dbus-crossroads",
+ "lib-multiseatd",
  "lib-scoped",
  "lib-sessiond",
  "libc",
- "multiseat-api",
  "seat-udev",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
-name = "multiseat-api"
-version = "0.1.0"
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
- "dbus",
+ "autocfg",
 ]
 
 [[package]]
@@ -365,6 +374,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -437,7 +447,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "seat-udev"
 version = "0.1.0"
-source = "git+ssh://git@github.com/shaitan-machine1/seat-udev.git?rev=00126146f8e1ba1417ed4ec31541a079cff57f47#00126146f8e1ba1417ed4ec31541a079cff57f47"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.0#a78f8a688701ca3262690eaa59f4542bed3d8b62"
 dependencies = [
  "libc",
  "nix",
