@@ -88,3 +88,9 @@ cargo clippy --all-targets -- -D warnings
 
 The integration test uses a private bus for the synchronous seat and session
 clients and a temporary arbitrary lib-scoped domain.
+
+All library dependencies are standalone Git dependencies over HTTPS:
+`lib-multiseatd`/`seat-udev` from the multiseat `v0.2.1` tag and
+`lib-scoped`/`lib-sessiond` from sessiond revision `27ef727`. No sibling
+checkout or `../` directory layout is required; the pinned revisions are in
+`Cargo.lock`.
