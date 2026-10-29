@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "lib-multiseatd"
 version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#ef8fd670d54f960132937107fbefa9ea9d59f0ed"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#e1ffd7941af4347cf99a1940984327729260886f"
 dependencies = [
  "dbus",
 ]
@@ -449,7 +449,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "seat-udev"
 version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#ef8fd670d54f960132937107fbefa9ea9d59f0ed"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#e1ffd7941af4347cf99a1940984327729260886f"
 dependencies = [
  "libc",
  "nix",
