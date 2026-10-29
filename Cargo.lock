@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "lib-multiseatd"
 version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.0#a78f8a688701ca3262690eaa59f4542bed3d8b62"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#ef8fd670d54f960132937107fbefa9ea9d59f0ed"
 dependencies = [
  "dbus",
 ]
@@ -284,6 +284,7 @@ dependencies = [
 [[package]]
 name = "lib-scoped"
 version = "0.1.0"
+source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=27ef72702556cf1018888eac25aaf655a6efd743#27ef72702556cf1018888eac25aaf655a6efd743"
 dependencies = [
  "libc",
  "nix",
@@ -294,6 +295,7 @@ dependencies = [
 [[package]]
 name = "lib-sessiond"
 version = "0.1.0"
+source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=27ef72702556cf1018888eac25aaf655a6efd743#27ef72702556cf1018888eac25aaf655a6efd743"
 dependencies = [
  "anyhow",
  "dbus",
@@ -447,7 +449,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "seat-udev"
 version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.0#a78f8a688701ca3262690eaa59f4542bed3d8b62"
+source = "git+https://github.com/shaitan-machine1/multiseat.git?tag=v0.2.1#ef8fd670d54f960132937107fbefa9ea9d59f0ed"
 dependencies = [
  "libc",
  "nix",
