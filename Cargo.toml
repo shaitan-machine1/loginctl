@@ -14,8 +14,8 @@ uuid = "1"
 libc = "0.2.191"
 lib-scoped = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "27ef72702556cf1018888eac25aaf655a6efd743" }
 lib-sessiond = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "27ef72702556cf1018888eac25aaf655a6efd743" }
-lib-multiseatd = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.1" }
-seat-udev = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.1", features = ["assign"] }
+lib-multiseatd = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.3" }
+seat-udev = { git = "https://github.com/shaitan-machine1/multiseat.git", tag = "v0.2.3", features = ["assign"] }
 
 [dev-dependencies]
 dbus-crossroads = "0.5.3"
