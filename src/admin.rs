@@ -1,4 +1,4 @@
-use crate::cli::{ClientCommand, ScopeCommand, SeatCommand, SessionCommand, TargetCommand};
+use crate::cli::{ScopeCommand, SeatCommand, SessionCommand, TargetCommand};
 use crate::output;
 use anyhow::{anyhow, Context, Result};
 use lib_scoped::{Domain, ScopeId, TargetId, TargetStatus};
@@ -25,33 +25,9 @@ pub fn seat(command: SeatCommand, timeout_seconds: u64) -> Result<String> {
             Ok(output::seats(&seats))
         }
         SeatCommand::Status => seat_status(timeout_seconds),
-        SeatCommand::Client { command } => {
-            let client = MultiseatClient::system(timeout(timeout_seconds))
-                .context("connect to the system bus for multiseatd")?;
-            match command {
-                ClientCommand::List { seat } => {
-                    let clients = service_call(
-                        "multiseatd",
-                        client.list_clients(),
-                        "call multiseatd ListClients",
-                    )?;
-                    let clients = clients
-                        .into_iter()
-                        .filter(|(_, owner, _, _)| {
-                            seat.as_ref().is_none_or(|seat| seat.as_str() == owner)
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(output::clients(&clients))
-                }
-                ClientCommand::Revoke { client: id } => {
-                    service_call(
-                        "multiseatd",
-                        client.revoke_client(&id),
-                        "call multiseatd RevokeClient",
-                    )?;
-                    Ok(format!("Revoked seat client {id}.\n"))
-                }
-            }
+        SeatCommand::Context { command } => crate::context::contexts(command, timeout_seconds),
+        SeatCommand::Connection { command } => {
+            crate::context::connections(command, timeout_seconds)
         }
         SeatCommand::Assign { device, seat } => {
             let group = assigner(timeout_seconds)

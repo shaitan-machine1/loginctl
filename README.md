@@ -14,8 +14,13 @@ mutating sessiond-owned scopes can be disruptive.
 
 ```text
 loginctl seat list|status
-loginctl seat client list [SEAT]
-loginctl seat client revoke CLIENT
+loginctl seat context list [SEAT]
+loginctl seat context show|activate|deactivate|remove CONTEXT
+loginctl seat context create SEAT [--activate] -- TRUSTED-CONTROLLER [ARGS...]
+loginctl seat context status --authority-fd FD
+loginctl seat context grant|revoke --authority-fd FD UID
+loginctl seat connection list [SEAT]
+loginctl seat connection remove CONNECTION
 loginctl seat assign DEVICE SEAT
 loginctl seat unassign DEVICE
 loginctl seat flush
@@ -55,10 +60,16 @@ the caller thread.
 
 Seat topology is reconciled continuously by multiseatd; there is no explicit
 refresh command. Status separates udev topology, brokered devices, direct-access
-devices, static direct-access nodes and persistent assignments. Client IDs are
-opaque UUIDv7 leases: revoking one revokes seat access, not a process.
+devices, static direct-access nodes and persistent assignments. Context and
+connection IDs are canonical UUIDv4 identifiers, not credentials. Global queries
+and ID-based mutations require root. Full authority is an inherited FD verified
+by multiseatd; it authorizes only that context. Removal does not terminate processes.
+`context create` delegates FULL authority to an explicitly trusted controller and
+removes the context after its exit; it does not activate unless requested. Never
+use that command to pass authority straight into an ordinary desktop application.
+Trusted launch code uses with-seat at the final compositor exec boundary.
 `seat flush` removes persistent assignment rules only; it does not flush daemon
-runtime state, revoke clients or clear ACLs. There is no `acl` command group.
+runtime state, remove contexts or clear ACLs. There is no `acl` command group.
 
 ## PAM configuration
 
@@ -89,8 +100,5 @@ cargo clippy --all-targets -- -D warnings
 The integration test uses a private bus for the synchronous seat and session
 clients and a temporary arbitrary lib-scoped domain.
 
-All library dependencies are standalone Git dependencies over HTTPS:
-`lib-multiseatd`/`seat-udev` from the multiseat `v0.2.1` tag and
-`lib-scoped`/`lib-sessiond` from sessiond revision `27ef727`. No sibling
-checkout or `../` directory layout is required; the pinned revisions are in
-`Cargo.lock`.
+Library dependencies use public HTTPS Git sources, with exact revisions recorded
+in Cargo.toml/Cargo.lock. All component clients remain synchronous and executor-free.

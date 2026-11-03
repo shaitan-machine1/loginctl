@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use lib_scoped::{ScopeId, TargetId};
+use libmultiseatd::{ConnectionId, ContextId};
 use seat_udev::SeatName;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -46,10 +48,15 @@ pub enum SeatCommand {
     List,
     /// Show udev seats, devices, and persistent assignments.
     Status,
-    /// Inspect or revoke opaque seat client leases (not processes).
-    Client {
+    /// Inspect and control capability-authorized contexts (not processes).
+    Context {
         #[command(subcommand)]
-        command: ClientCommand,
+        command: ContextCommand,
+    },
+    /// Inspect or remove independent seatd connections.
+    Connection {
+        #[command(subcommand)]
+        command: ConnectionCommand,
     },
     /// Assign a complete ID_FOR_SEAT device group to a seat.
     Assign { device: PathBuf, seat: SeatName },
@@ -60,27 +67,51 @@ pub enum SeatCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ClientCommand {
-    /// List live seat clients, optionally restricted to one seat.
-    List { seat: Option<SeatName> },
-    /// Revoke a seat client; this does not kill a process.
+pub enum ContextCommand {
+    List {
+        seat: Option<SeatName>,
+    },
+    Show {
+        context: ContextId,
+    },
+    Activate {
+        context: ContextId,
+    },
+    Deactivate {
+        context: ContextId,
+    },
+    Remove {
+        context: ContextId,
+    },
+    /// Delegate full authority to an explicitly trusted controller until exit.
+    Create {
+        seat: SeatName,
+        #[arg(long)]
+        activate: bool,
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
+    /// Show only the context authorized by an inherited FD.
+    Status {
+        #[arg(long, value_parser = clap::value_parser!(i32).range(3..))]
+        authority_fd: i32,
+    },
+    Grant {
+        #[arg(long, value_parser = clap::value_parser!(i32).range(3..))]
+        authority_fd: i32,
+        uid: u32,
+    },
     Revoke {
-        #[arg(value_parser = parse_client_id)]
-        client: String,
+        #[arg(long, value_parser = clap::value_parser!(i32).range(3..))]
+        authority_fd: i32,
+        uid: u32,
     },
 }
 
-pub fn parse_client_id(value: &str) -> Result<String, String> {
-    match uuid::Uuid::parse_str(value) {
-        Ok(id)
-            if id.to_string() == value
-                && id.get_version_num() == 7
-                && id.get_variant() == uuid::Variant::RFC4122 =>
-        {
-            Ok(value.to_owned())
-        }
-        _ => Err("client ID must be a canonical UUIDv7".into()),
-    }
+#[derive(Debug, Subcommand)]
+pub enum ConnectionCommand {
+    List { seat: Option<SeatName> },
+    Remove { connection: ConnectionId },
 }
 
 #[derive(Debug, Subcommand)]
@@ -243,14 +274,33 @@ mod tests {
         for args in [
             vec!["loginctl", "seat", "list"],
             vec!["loginctl", "seat", "status"],
-            vec!["loginctl", "seat", "client", "list"],
-            vec!["loginctl", "seat", "client", "list", "seat0"],
+            vec!["loginctl", "seat", "context", "list"],
+            vec!["loginctl", "seat", "connection", "list"],
             vec![
                 "loginctl",
                 "seat",
-                "client",
-                "revoke",
-                "01900000-0000-7000-8000-000000000000",
+                "context",
+                "create",
+                "seat0",
+                "--",
+                "trusted-controller",
+            ],
+            vec![
+                "loginctl",
+                "seat",
+                "context",
+                "grant",
+                "--authority-fd",
+                "3",
+                "1000",
+            ],
+            vec!["loginctl", "seat", "context", "list", "seat0"],
+            vec![
+                "loginctl",
+                "seat",
+                "connection",
+                "remove",
+                "01900000-0000-4000-8000-000000000000",
             ],
             vec!["loginctl", "seat", "assign", "/dev/dri/card0", "seat1"],
             vec!["loginctl", "seat", "unassign", "/dev/dri/card0"],
@@ -300,10 +350,10 @@ mod tests {
         assert!(Args::try_parse_from(["loginctl", "acl", "status"]).is_err());
         for id in [
             "bad",
-            "01900000-0000-4000-8000-000000000000",
+            "01900000-0000-7000-8000-000000000000",
             "01900000-0000-7000-C000-000000000000",
         ] {
-            assert!(Args::try_parse_from(["loginctl", "seat", "client", "revoke", id]).is_err());
+            assert!(Args::try_parse_from(["loginctl", "seat", "context", "remove", id]).is_err());
         }
     }
 }

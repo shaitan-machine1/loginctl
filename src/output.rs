@@ -1,16 +1,20 @@
 use lib_sessiond::Session;
-use libmultiseatd::ClientRow;
+use libmultiseatd::{ConnectionRow, ContextRow, SeatRow};
 use seat_udev::{SeatDevice, SeatName};
 use std::fmt::Write;
 use std::path::PathBuf;
 
-pub fn seats(seats: &[String]) -> String {
+pub fn seats(seats: &[SeatRow]) -> String {
     if seats.is_empty() {
-        return "No seats.\n".to_owned();
+        return "No seats.\n".into();
     }
-    let mut output = "SEAT\n".to_owned();
-    for seat in seats {
-        writeln!(output, "{seat}").expect("writing to String cannot fail");
+    let mut output = "SEAT  VT  FOREGROUND  SELECTED  EFFECTIVE  PHASE  CLEANUP\n".to_owned();
+    for (name, vt, foreground, selected, effective, phase, cleanup) in seats {
+        writeln!(
+            output,
+            "{name}  {vt}  {foreground}  {selected}  {effective}  {phase}  {cleanup}"
+        )
+        .expect("String write");
     }
     output
 }
@@ -73,13 +77,35 @@ pub fn scope_of(pid: u32, scope: &str) -> String {
     format!("{:>pid_width$}  SCOPE\n{pid:>pid_width$}  {scope}\n", "PID")
 }
 
-pub fn clients(clients: &[ClientRow]) -> String {
-    if clients.is_empty() {
-        return "No seat clients.\n".into();
+pub fn contexts(contexts: &[ContextRow]) -> String {
+    if contexts.is_empty() {
+        return "No contexts.\n".into();
     }
-    let mut output = "CLIENT  SEAT  UID  STATE\n".to_owned();
-    for (id, seat, uid, state) in clients {
-        writeln!(output, "{id}  {seat}  {uid}  {state}").expect("String write");
+    let mut output =
+        "CONTEXT  SEAT  PHASE  UIDS  SELECTED  EFFECTIVE  CONNECTIONS  CLEANUP\n".to_owned();
+    for (id, seat, phase, users, connections, selected, effective, cleanup) in contexts {
+        let users = users
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(
+            output,
+            "{id}  {seat}  {phase}  {users}  {selected}  {effective}  {}  {cleanup}",
+            connections.join(",")
+        )
+        .expect("String write");
+    }
+    output
+}
+
+pub fn connections(connections: &[ConnectionRow]) -> String {
+    if connections.is_empty() {
+        return "No connections.\n".into();
+    }
+    let mut output = "CONNECTION  CONTEXT  SEAT  STATE  CLEANUP\n".to_owned();
+    for (id, context, seat, state, cleanup) in connections {
+        writeln!(output, "{id}  {context}  {seat}  {state}  {cleanup}").expect("String write");
     }
     output
 }
@@ -141,7 +167,8 @@ mod tests {
         assert_eq!(seats(&[]), "No seats.\n");
         assert_eq!(sessions(&[]), "No sessions.\n");
         assert_eq!(scopes(&[]), "No matching scopes.\n");
-        assert_eq!(clients(&[]), "No seat clients.\n");
+        assert_eq!(contexts(&[]), "No contexts.\n");
+        assert_eq!(connections(&[]), "No connections.\n");
     }
 
     #[test]
@@ -171,16 +198,11 @@ mod tests {
     }
 
     #[test]
-    fn renders_scope_lookup_and_clients_without_process_kill_language() {
+    fn renders_scope_lookup_and_connections_without_process_kill_language() {
         assert_eq!(scope_of(99, ""), "PID 99 is not in a managed scope.\n");
         assert_eq!(
-            clients(&[(
-                "opaque-id".into(),
-                "seat0".into(),
-                1000,
-                "pending-disable".into()
-            )]),
-            "CLIENT  SEAT  UID  STATE\nopaque-id  seat0  1000  pending-disable\n"
+            connections(&[("opaque-id".into(), "context-id".into(), "seat0".into(), "pending-disable".into(), String::new())]),
+            "CONNECTION  CONTEXT  SEAT  STATE  CLEANUP\nopaque-id  context-id  seat0  pending-disable  \n"
         );
     }
 
@@ -191,6 +213,7 @@ mod tests {
             syspath: "/sys/audio".into(),
             devnode: Some("/dev/audio".into()),
             devnum: None,
+            node_identity: None,
             seat: seat.clone(),
             kind: seat_udev::DeviceKind::Other,
             uaccess: true,

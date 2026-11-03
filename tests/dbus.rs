@@ -3,9 +3,10 @@ use dbus::channel::MatchingReceiver;
 use dbus::message::MatchRule;
 use dbus_crossroads::Crossroads;
 use loginctl::admin;
-use loginctl::cli::{ClientCommand, ScopeCommand, SeatCommand, SessionCommand};
-const CLIENT_ID: &str = "01900000-0000-7000-8000-000000000000";
-use std::os::fd::{AsRawFd, IntoRawFd};
+use loginctl::cli::{ConnectionCommand, ScopeCommand, SeatCommand, SessionCommand};
+const CONNECTION_ID: &str = "01900000-0000-4000-8000-000000000000";
+const CONTEXT_ID: &str = "01900000-0000-4000-8000-000000000002";
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -72,42 +73,65 @@ impl Server {
         });
         let seats = crossroads.register(libmultiseatd::INTERFACE_NAME, |builder| {
             builder.method("ListSeats", (), ("seats",), |_, _, ()| {
-                Ok((vec!["seat0".to_owned()],))
+                Ok((vec![(
+                    "seat0".to_owned(),
+                    7u32,
+                    true,
+                    CONTEXT_ID.to_owned(),
+                    CONTEXT_ID.to_owned(),
+                    "idle".to_owned(),
+                    String::new(),
+                )],))
             });
             builder.method(
-                "CreateClient",
-                ("seat", "uid"),
-                ("client_id", "fd"),
-                |_, _, (seat, uid): (String, u32)| {
-                    assert_eq!((seat.as_str(), uid), ("seat0", 1000));
+                "CreateContext",
+                ("seat",),
+                ("authority", "context_id"),
+                |_, _, (seat,): (String,)| {
+                    assert_eq!(seat, "seat0");
                     let (fd, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-                    // SAFETY: transfer the descriptor to the D-Bus value once.
-                    let fd = unsafe { dbus::arg::OwnedFd::new(fd.into_raw_fd()) };
-                    Ok((CLIENT_ID.to_owned(), fd))
+                    Ok((
+                        unsafe { dbus::arg::OwnedFd::new(fd.into_raw_fd()) },
+                        CONTEXT_ID.to_owned(),
+                    ))
                 },
             );
             builder.method(
-                "RevokeClient",
-                ("client_id",),
+                "CreateConnection",
+                ("authority",),
+                ("connection", "connection_id"),
+                |_, _, (_authority,): (dbus::arg::OwnedFd,)| {
+                    let (fd, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+                    Ok((
+                        unsafe { dbus::arg::OwnedFd::new(fd.into_raw_fd()) },
+                        CONNECTION_ID.to_owned(),
+                    ))
+                },
+            );
+            builder.method(
+                "RemoveConnectionById",
+                ("connection_id",),
                 (),
                 |_, _, (id,): (String,)| {
-                    assert_eq!(id, CLIENT_ID);
+                    assert_eq!(id, CONNECTION_ID);
                     Ok(())
                 },
             );
-            builder.method("ListClients", (), ("clients",), |_, _, ()| {
+            builder.method("ListConnections", (), ("connections",), |_, _, ()| {
                 Ok((vec![
                     (
-                        CLIENT_ID.to_owned(),
+                        CONNECTION_ID.to_owned(),
+                        CONTEXT_ID.to_owned(),
                         "seat0".to_owned(),
-                        1000u32,
-                        "active".to_owned(),
+                        "enabled".to_owned(),
+                        String::new(),
                     ),
                     (
-                        "01900000-0000-7000-8000-000000000001".to_owned(),
+                        "01900000-0000-4000-8000-000000000001".to_owned(),
+                        CONTEXT_ID.to_owned(),
                         "seat1".to_owned(),
-                        1001u32,
                         "connected".to_owned(),
+                        String::new(),
                     ),
                 ],))
             });
@@ -145,18 +169,25 @@ impl Drop for Server {
 fn commands_use_synchronous_component_clients_and_direct_scopes() {
     let _bus = PrivateBus::start();
     let server = Server::start();
-    assert_eq!(admin::seat(SeatCommand::List, 15).unwrap(), "SEAT\nseat0\n");
+    let listed = admin::seat(SeatCommand::List, 15).unwrap();
+    assert!(listed.contains("SEAT  VT  FOREGROUND"));
+    assert!(listed.contains("seat0  7  true"));
     let client = libmultiseatd::Client::system(Duration::from_secs(2)).unwrap();
-    let (id, fd) = client.create_client("seat0", 1000).unwrap();
-    assert_eq!(id, CLIENT_ID);
+    let context = client.create_context("seat0").unwrap();
+    assert_eq!(context.id.to_string(), CONTEXT_ID);
+    let connection = client.create_connection(context.as_fd()).unwrap();
+    assert_eq!(connection.id.to_string(), CONNECTION_ID);
+    let fd = connection.into_fd();
     // SAFETY: fd is live for the duration of this fcntl call.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
     assert_ne!(flags & libc::FD_CLOEXEC, 0);
     drop(fd);
-    client.revoke_client(&id).unwrap();
+    client
+        .remove_connection_by_id(CONNECTION_ID.parse().unwrap())
+        .unwrap();
     let all = admin::seat(
-        SeatCommand::Client {
-            command: ClientCommand::List { seat: None },
+        SeatCommand::Connection {
+            command: ConnectionCommand::List { seat: None },
         },
         15,
     )
@@ -164,8 +195,8 @@ fn commands_use_synchronous_component_clients_and_direct_scopes() {
     assert!(all.contains("seat0"));
     assert!(all.contains("seat1"));
     let selected = admin::seat(
-        SeatCommand::Client {
-            command: ClientCommand::List {
+        SeatCommand::Connection {
+            command: ConnectionCommand::List {
                 seat: Some(seat_udev::SeatName::seat0()),
             },
         },
@@ -175,15 +206,18 @@ fn commands_use_synchronous_component_clients_and_direct_scopes() {
     assert!(selected.contains("seat0"));
     assert!(!selected.contains("seat1"));
     let revoked = admin::seat(
-        SeatCommand::Client {
-            command: ClientCommand::Revoke {
-                client: CLIENT_ID.into(),
+        SeatCommand::Connection {
+            command: ConnectionCommand::Remove {
+                connection: CONNECTION_ID.parse().unwrap(),
             },
         },
         15,
     )
     .unwrap();
-    assert_eq!(revoked, format!("Revoked seat client {CLIENT_ID}.\n"));
+    assert_eq!(
+        revoked,
+        format!("Removed connection {CONNECTION_ID}; no process was terminated.\n")
+    );
     assert!(!revoked.contains("kill"));
     assert!(admin::session(
         SessionCommand::Close {

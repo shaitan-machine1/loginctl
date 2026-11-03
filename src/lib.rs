@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod cli;
 pub mod config;
+mod context;
 pub mod output;
 pub mod pam;
 
