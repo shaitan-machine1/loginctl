@@ -4,6 +4,24 @@ use seat_udev::{SeatDevice, SeatName};
 use std::fmt::Write;
 use std::path::PathBuf;
 
+/// Preserve remote categories in human diagnostics as well as typed errors.
+pub fn failure(error: &anyhow::Error) -> String {
+    let mut text = format!("{error:#}");
+    if let Some(remote) = error.downcast_ref::<dbus::Error>() {
+        if let Some(name) = remote.name() {
+            write!(text, " [{name}]").expect("String write");
+        }
+    }
+    if let Some(refresh) = error.downcast_ref::<libmultiseatd::RefreshError>() {
+        for failure in &refresh.failures {
+            if let Some(name) = failure.error.name() {
+                write!(text, " [{} {:?}: {name}]", failure.seat, failure.stage)
+                    .expect("String write");
+            }
+        }
+    }
+    text
+}
 pub fn seats(seats: &[String]) -> String {
     if seats.is_empty() {
         return "No seats.\n".into();
@@ -157,6 +175,23 @@ mod tests {
     const A: &str = "0123456789abcdef0123456789abcdef";
     const B: &str = "1123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn critical_remote_categories_survive_human_diagnostics() {
+        let error = anyhow::Error::new(
+            libmultiseatd::ErrorKind::CriticalFailure.error("ACL deadline expired"),
+        );
+        assert!(failure(&error).contains("org.SGLogin.Multiseatd1.Error.CriticalFailure"));
+        let error = anyhow::Error::new(libmultiseatd::RefreshError {
+            addition_started: false,
+            failures: vec![libmultiseatd::SeatFailure {
+                seat: "seat0".into(),
+                stage: libmultiseatd::RefreshStage::Removal,
+                error: libmultiseatd::ErrorKind::CriticalFailure.error("ACL deadline expired"),
+            }],
+        });
+        assert!(failure(&error)
+            .contains("seat0 Removal: org.SGLogin.Multiseatd1.Error.CriticalFailure"));
+    }
     #[test]
     fn renders_explicit_empty_states() {
         assert_eq!(seats(&[]), "No seats.\n");

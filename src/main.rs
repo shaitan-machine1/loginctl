@@ -9,7 +9,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("loginctl: {error:#}");
+            eprintln!("loginctl: {}", loginctl::output::failure(&error));
             ExitCode::FAILURE
         }
     }

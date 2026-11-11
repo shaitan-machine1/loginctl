@@ -6,7 +6,7 @@ pub const CONFIG_PATH: &str = "/etc/loginctl.conf";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub pam_file: PathBuf,
-    seat_setting: Option<String>,
+    seat_settings: Vec<String>,
 }
 
 impl Config {
@@ -22,7 +22,7 @@ impl Config {
 
     pub fn parse(contents: &str) -> Result<Self> {
         let mut pam_file = None;
-        let mut seat_setting = None;
+        let mut seat_settings = Vec::new();
         for (index, raw) in contents.lines().enumerate() {
             let line_number = index + 1;
             let line = raw.trim();
@@ -47,28 +47,21 @@ impl Config {
                     }
                     pam_file = Some(path);
                 }
-                "seats" => {
-                    if seat_setting.is_some() {
-                        bail!("line {line_number}: duplicate seats setting");
-                    }
-                    seat_setting = Some(raw_value.to_owned());
-                }
+                "seats" => seat_settings.push(raw_value.to_owned()),
                 _ => bail!("line {line_number}: unknown setting {key}"),
             }
         }
         Ok(Self {
             pam_file: pam_file.context("missing required pam_file setting")?,
-            seat_setting,
+            seat_settings,
         })
     }
     /// Validate only for configured-seat listing/movement, never for PAM/scopes.
     pub fn configured_seats(&self) -> Result<Vec<String>> {
-        let value = parse_quoted(
-            self.seat_setting
-                .as_deref()
-                .context("missing explicit seats setting")?,
-        )
-        .context("invalid seats setting")?;
+        let [raw] = self.seat_settings.as_slice() else {
+            bail!("require exactly one explicit seats setting");
+        };
+        let value = parse_quoted(raw).context("invalid seats setting")?;
         let seats: Vec<String> = value.split_whitespace().map(str::to_owned).collect();
         if seats.is_empty() || seats.len() > 256 {
             bail!("configure between 1 and 256 explicit seats");
@@ -126,7 +119,7 @@ mod tests {
                 .expect("valid config"),
             Config {
                 pam_file: "/etc/pam.d/system-login".into(),
-                seat_setting: None
+                seat_settings: Vec::new()
             }
         );
     }
@@ -151,6 +144,11 @@ mod tests {
             assert_eq!(config.pam_file, PathBuf::from("/etc/pam.d/x"));
             assert!(config.configured_seats().is_err());
         }
+        let duplicate =
+            Config::parse("pam_file = \"/etc/pam.d/x\"\nseats = \"seat0\"\nseats = \"seat1\"")
+                .unwrap();
+        assert!(duplicate.configured_seats().is_err());
+        assert_eq!(duplicate.pam_file, PathBuf::from("/etc/pam.d/x"));
         let config = Config::parse("pam_file = \"/etc/pam.d/x\"\nseats = \"seat0 seat1\"").unwrap();
         assert_eq!(config.configured_seats().unwrap(), ["seat0", "seat1"]);
     }
