@@ -48,6 +48,8 @@ pub enum SeatCommand {
     List,
     /// Show udev seats, devices, and persistent assignments.
     Status,
+    /// Apply assignments: all configured seats remove before any seat adds.
+    Refresh,
     /// Inspect and control capability-authorized contexts (not processes).
     Context {
         seat: SeatName,
@@ -271,6 +273,7 @@ mod tests {
     fn parses_every_command_group() {
         for args in [
             vec!["loginctl", "seat", "list"],
+            vec!["loginctl", "seat", "refresh"],
             vec!["loginctl", "seat", "status"],
             vec!["loginctl", "seat", "context", "seat0", "list"],
             vec!["loginctl", "seat", "disconnect", "--connection-fd", "3"],
@@ -347,7 +350,7 @@ mod tests {
         let seat = Args::try_parse_from(["loginctl", "seat", "assign", "/dev/null", "not/a/seat"])
             .expect_err("invalid seat is rejected");
         assert_eq!(seat.kind(), ErrorKind::ValueValidation);
-        assert!(Args::try_parse_from(["loginctl", "seat", "refresh"]).is_err());
+        assert!(Args::try_parse_from(["loginctl", "seat", "refresh", "seat0"]).is_err());
         assert!(Args::try_parse_from(["loginctl", "acl", "status"]).is_err());
         for id in [
             "bad",

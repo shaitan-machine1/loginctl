@@ -13,7 +13,7 @@ mutating sessiond-owned scopes can be disruptive.
 ## Commands
 
 ```text
-loginctl seat list|status
+loginctl seat list|status|refresh
 loginctl seat context SEAT list
 loginctl seat context SEAT show|activate|deactivate|foreground|remove CONTEXT
 loginctl seat context SEAT create [--vt VT] [--activate] -- TRUSTED-CONTROLLER [ARGS...]
@@ -58,16 +58,19 @@ removal only unregisters tracking. `scope watch` waits for subtree emptiness on
 the caller thread.
 
 Physical hotplug is continuous, but assignment changes are explicit. Assign,
-unassign and flush first validate the complete configured participant list, then
-change rules and synchronously remove unassigned devices on ALL reachable seats.
-Only unanimous removal and unchanged pinned owners permit ANY additions. An
-offline configured seat blocks additions; errors preserve partial actual results,
-with no rollback/automatic retry. Retire/recover an old owner before omitting it
-from configuration. Finish assignments before destination startup; enumeration
-is not a live move. `seat list` shows configured participants, not bus discovery.
-There is no separate refresh command. Status separates udev topology, brokered devices, direct-access
-devices, static direct-access nodes and persistent assignments. Context IDs are
-canonical UUIDv7, not credentials; connection handles are context-local numbers.
+unassign and flush change persistent rules and trigger udev only; they print an
+instruction to run `loginctl seat refresh` separately. They need no participant
+configuration or running seat daemons and never implicitly refresh runtime policy.
+Refresh validates the complete configured list, then synchronously removes
+unassigned devices on ALL reachable configured seats. Only unanimous removal and
+unchanged pinned owners permit ANY additions. An offline configured seat blocks
+additions; errors preserve partial actual results, with no rollback/automatic
+retry. Retire/recover an old owner before omitting it from configuration. Finish
+assignments before destination startup; initial enumeration is not a live move.
+`seat list` shows configured participants, not bus discovery. Status separates
+udev topology, brokered devices, direct-access devices, static direct-access nodes
+and persistent assignments. Context IDs are canonical UUIDv7, not credentials;
+connection handles are diagnostic socket numbers scoped to a seat/unique owner.
 Every context command routes to an explicit seat. Listing and ID-based mutations
 require root; activation/deactivation/foreground have no capability variants. Full authority is an inherited FD verified
 by multiseatd; it authorizes only that context. Removal does not terminate processes.
@@ -75,8 +78,8 @@ by multiseatd; it authorizes only that context. Removal does not terminate proce
 removes the context after its exit; it does not activate unless requested. Never
 use that command to pass authority straight into an ordinary desktop application.
 Trusted launch code uses seat-launch at the final compositor exec boundary.
-`seat flush` removes persistent rules and performs the same removal-before-addition
-refresh; it never removes contexts or terminates processes. Connection disconnect
+`seat flush` removes all managed persistent rules, including offline ones, not
+contexts/processes or runtime admission. Follow it with explicit refresh if needed. Connection disconnect
 operates on a possessed inherited FD, not a global ID or remote RPC. There is no `acl` command group.
 
 ## PAM configuration

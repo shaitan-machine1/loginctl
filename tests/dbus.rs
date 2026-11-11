@@ -185,15 +185,7 @@ fn explicit_routing_refresh_root_owner_and_unchanged_session_scope_clients() {
         "CONFIGURED SEAT\nseat0\nseat1\n"
     );
     let invalid = Config::parse("pam_file = \"/etc/pam.d/system-login\"\nseats = \"*\"").unwrap();
-    let rejected = admin::seat_with_config(
-        SeatCommand::Assign {
-            device: "/nonexistent-assignment-fixture".into(),
-            seat: seat_udev::SeatName::seat0(),
-        },
-        2,
-        &invalid,
-    )
-    .unwrap_err();
+    let rejected = admin::seat_with_config(SeatCommand::Refresh, 2, &invalid).unwrap_err();
     assert!(format!("{rejected:#}").contains("invalid configured seat"));
     assert!(events.lock().unwrap().is_empty());
     if unsafe { libc::geteuid() } == 0 {
@@ -238,19 +230,18 @@ fn explicit_routing_refresh_root_owner_and_unchanged_session_scope_clients() {
             )
             .unwrap();
         }
-        libmultiseatd::refresh_devices_with_timeout(
-            &config.configured_seats().unwrap(),
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        assert_eq!(
+            admin::seat_with_config(SeatCommand::Refresh, 2, &config).unwrap(),
+            "Refreshed all configured seats.\n"
+        );
         assert_eq!(
             *events.lock().unwrap(),
             ["remove:seat0", "remove:seat1", "add:seat0", "add:seat1"]
         );
         drop(second);
         events.lock().unwrap().clear();
-        let failure =
-            libmultiseatd::refresh_devices(&config.configured_seats().unwrap()).unwrap_err();
+        let error = admin::seat_with_config(SeatCommand::Refresh, 2, &config).unwrap_err();
+        let failure = error.downcast_ref::<libmultiseatd::RefreshError>().unwrap();
         assert!(!failure.addition_started);
         assert_eq!(*events.lock().unwrap(), ["remove:seat0"]);
     } else {

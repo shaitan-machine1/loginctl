@@ -30,19 +30,26 @@ fn seat_configured(
     match command {
         SeatCommand::List => Ok(output::seats(&load()?.configured_seats()?)),
         SeatCommand::Status => seat_status(timeout_seconds),
+        SeatCommand::Refresh => {
+            let participants = load()?.configured_seats()?;
+            libmultiseatd::refresh_devices_with_timeout(&participants, timeout(timeout_seconds))
+                .context(
+                "explicit seat refresh failed (partial effects; no rollback or automatic retry)",
+            )?;
+            Ok("Refreshed all configured seats.\n".into())
+        }
         SeatCommand::Context { seat, command } => {
             crate::context::contexts(seat.as_str(), command, timeout_seconds)
         }
         SeatCommand::Disconnect { connection_fd } => crate::context::disconnect(connection_fd),
         SeatCommand::Assign { device, seat } => {
-            let participants = load()?.configured_seats()?;
             let group = assigner(timeout_seconds)
                 .assign(&device, &seat)
                 .with_context(|| {
                     format!("assign device group for {} to {seat}", device.display())
                 })?;
-            refresh_assignments(&participants, timeout_seconds)?;
             let mut result = format_group("assigned", &group);
+            result.push_str(REFRESH_INSTRUCTION);
             if !group.has_master {
                 writeln!(
                     result,
@@ -54,33 +61,34 @@ fn seat_configured(
             Ok(result)
         }
         SeatCommand::Unassign { device } => {
-            let participants = load()?.configured_seats()?;
             let group = assigner(timeout_seconds)
                 .unassign(&device)
                 .with_context(|| format!("unassign device group for {}", device.display()))?;
-            refresh_assignments(&participants, timeout_seconds)?;
-            Ok(format_group("unassigned", &group))
+            Ok(format!(
+                "{}{REFRESH_INSTRUCTION}",
+                format_group("unassigned", &group)
+            ))
         }
         SeatCommand::Flush => {
-            let participants = load()?.configured_seats()?;
             let groups = assigner(timeout_seconds)
                 .flush()
                 .context("flush persistent seat assignments")?;
-            refresh_assignments(&participants, timeout_seconds)?;
-            if groups.is_empty() {
-                return Ok("No persistent assignments.\n".to_owned());
-            }
-            Ok(groups
-                .iter()
-                .map(|group| format_group("unassigned", group))
-                .collect())
+            let mut result = if groups.is_empty() {
+                "No persistent assignments.\n".to_owned()
+            } else {
+                groups
+                    .iter()
+                    .map(|group| format_group("unassigned", group))
+                    .collect()
+            };
+            result.push_str(REFRESH_INSTRUCTION);
+            Ok(result)
         }
     }
 }
 
-fn refresh_assignments(seats: &[String], seconds: u64) -> Result<()> {
-    libmultiseatd::refresh_devices_with_timeout(seats, timeout(seconds)).context("assignment rules were changed; explicit seat refresh failed (no rollback or automatic retry)")
-}
+const REFRESH_INSTRUCTION: &str =
+    "Run `loginctl seat refresh` explicitly to apply assignments to running seats.\n";
 
 pub fn session(command: SessionCommand, timeout_seconds: u64) -> Result<String> {
     match command {
