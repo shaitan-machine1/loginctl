@@ -5,7 +5,6 @@ use lib_scoped::{Domain, ScopeId, TargetId, TargetStatus};
 use lib_sessiond::bus::Client as SessiondClient;
 use lib_sessiond::config::Config as SessionConfig;
 use lib_sessiond::SessionCore;
-use libmultiseatd::Client as MultiseatClient;
 use seat_udev::assign::{Assigner, AssignmentGroup, RealAssignmentBackend};
 use seat_udev::{Context as UdevContext, Filter};
 use std::fmt::Write as FmtWrite;
@@ -13,28 +12,36 @@ use std::path::Path;
 use std::time::Duration;
 
 pub fn seat(command: SeatCommand, timeout_seconds: u64) -> Result<String> {
+    seat_configured(command, timeout_seconds, crate::config::Config::load)
+}
+/// Explicit caller-supplied configuration, also useful on disposable private buses.
+pub fn seat_with_config(
+    command: SeatCommand,
+    timeout_seconds: u64,
+    config: &crate::config::Config,
+) -> Result<String> {
+    seat_configured(command, timeout_seconds, || Ok(config.clone()))
+}
+fn seat_configured(
+    command: SeatCommand,
+    timeout_seconds: u64,
+    load: impl FnOnce() -> Result<crate::config::Config>,
+) -> Result<String> {
     match command {
-        SeatCommand::List => {
-            let client = MultiseatClient::system(timeout(timeout_seconds))
-                .context("connect to the system bus for multiseatd")?;
-            let seats = service_call(
-                "multiseatd",
-                client.list_seats(),
-                "call multiseatd ListSeats",
-            )?;
-            Ok(output::seats(&seats))
-        }
+        SeatCommand::List => Ok(output::seats(&load()?.configured_seats()?)),
         SeatCommand::Status => seat_status(timeout_seconds),
-        SeatCommand::Context { command } => crate::context::contexts(command, timeout_seconds),
-        SeatCommand::Connection { command } => {
-            crate::context::connections(command, timeout_seconds)
+        SeatCommand::Context { seat, command } => {
+            crate::context::contexts(seat.as_str(), command, timeout_seconds)
         }
+        SeatCommand::Disconnect { connection_fd } => crate::context::disconnect(connection_fd),
         SeatCommand::Assign { device, seat } => {
+            let participants = load()?.configured_seats()?;
             let group = assigner(timeout_seconds)
                 .assign(&device, &seat)
                 .with_context(|| {
                     format!("assign device group for {} to {seat}", device.display())
                 })?;
+            refresh_assignments(&participants, timeout_seconds)?;
             let mut result = format_group("assigned", &group);
             if !group.has_master {
                 writeln!(
@@ -47,15 +54,19 @@ pub fn seat(command: SeatCommand, timeout_seconds: u64) -> Result<String> {
             Ok(result)
         }
         SeatCommand::Unassign { device } => {
+            let participants = load()?.configured_seats()?;
             let group = assigner(timeout_seconds)
                 .unassign(&device)
                 .with_context(|| format!("unassign device group for {}", device.display()))?;
+            refresh_assignments(&participants, timeout_seconds)?;
             Ok(format_group("unassigned", &group))
         }
         SeatCommand::Flush => {
+            let participants = load()?.configured_seats()?;
             let groups = assigner(timeout_seconds)
                 .flush()
                 .context("flush persistent seat assignments")?;
+            refresh_assignments(&participants, timeout_seconds)?;
             if groups.is_empty() {
                 return Ok("No persistent assignments.\n".to_owned());
             }
@@ -65,6 +76,10 @@ pub fn seat(command: SeatCommand, timeout_seconds: u64) -> Result<String> {
                 .collect())
         }
     }
+}
+
+fn refresh_assignments(seats: &[String], seconds: u64) -> Result<()> {
+    libmultiseatd::refresh_devices_with_timeout(seats, timeout(seconds)).context("assignment rules were changed; explicit seat refresh failed (no rollback or automatic retry)")
 }
 
 pub fn session(command: SessionCommand, timeout_seconds: u64) -> Result<String> {
@@ -326,7 +341,7 @@ fn format_group(action: &str, group: &AssignmentGroup) -> String {
     }
     output
 }
-fn service_call<T>(
+pub(crate) fn service_call<T>(
     component: &str,
     result: std::result::Result<T, dbus::Error>,
     context: &str,

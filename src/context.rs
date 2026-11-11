@@ -1,5 +1,5 @@
 //! Synchronous context/connection administration, separate from process lifetime.
-use crate::cli::{ConnectionCommand, ContextCommand};
+use crate::cli::ContextCommand;
 use crate::output;
 use anyhow::{bail, Context as _, Result};
 use libmultiseatd::Client;
@@ -7,31 +7,32 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
-fn client(seconds: u64) -> Result<Client> {
-    Client::system(Duration::from_secs(seconds)).context("connect to multiseatd")
+fn client(seat: &str, seconds: u64) -> Result<Client> {
+    crate::admin::service_call(
+        "multiseatd",
+        Client::system_with_timeout(seat, Duration::from_secs(seconds.max(1))),
+        "connect to configured multiseatd seat",
+    )
 }
 fn authority(raw: i32) -> Result<OwnedFd> {
     if raw < 3 || unsafe { libc::fcntl(raw, libc::F_GETFD) } < 0 {
         bail!("authority must name a live inherited descriptor >= 3")
     }
-    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+    let copy = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+    if copy < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
-pub fn contexts(command: ContextCommand, seconds: u64) -> Result<String> {
-    let client = client(seconds)?;
+pub fn contexts(seat: &str, command: ContextCommand, seconds: u64) -> Result<String> {
+    let client = client(seat, seconds)?;
     match command {
-        ContextCommand::List { seat } => {
-            let rows: Vec<_> = client
-                .list_contexts()?
-                .into_iter()
-                .filter(|row| seat.as_ref().is_none_or(|seat| seat.as_str() == row.1))
-                .collect();
-            Ok(output::contexts(&rows))
-        }
+        ContextCommand::List => Ok(output::contexts(&client.list_contexts()?)),
         ContextCommand::Show { context } => {
             let rows: Vec<_> = client
                 .list_contexts()?
                 .into_iter()
-                .filter(|row| row.0 == context.to_string())
+                .filter(|row| row.id == context)
                 .collect();
             if rows.is_empty() {
                 bail!("unknown context {context}")
@@ -39,12 +40,16 @@ pub fn contexts(command: ContextCommand, seconds: u64) -> Result<String> {
             Ok(output::contexts(&rows))
         }
         ContextCommand::Activate { context } => {
-            client.activate_context_by_id(context)?;
+            client.activate_context(context)?;
             Ok(format!("Activated context {context}.\n"))
         }
         ContextCommand::Deactivate { context } => {
-            client.deactivate_context_by_id(context)?;
+            client.deactivate_context(context)?;
             Ok(format!("Deactivated context {context}.\n"))
+        }
+        ContextCommand::Foreground { context } => {
+            client.move_to_foreground(context)?;
+            Ok(format!("Foreground context {context}.\n"))
         }
         ContextCommand::Remove { context } => {
             client.remove_context_by_id(context)?;
@@ -58,30 +63,35 @@ pub fn contexts(command: ContextCommand, seconds: u64) -> Result<String> {
         }
         ContextCommand::Grant { authority_fd, uid } => {
             let fd = authority(authority_fd)?;
-            client.grant_access(fd.as_fd(), uid)?;
+            client.add_acl_grant(fd.as_fd(), uid)?;
             Ok(format!("Registered UID {uid}.\n"))
         }
         ContextCommand::Revoke { authority_fd, uid } => {
             let fd = authority(authority_fd)?;
-            client.revoke_access(fd.as_fd(), uid)?;
+            client.remove_acl_grant(fd.as_fd(), uid)?;
             Ok(format!("Revoked UID {uid}.\n"))
         }
         ContextCommand::Create {
-            seat,
+            vt,
             activate,
             command,
         } => {
-            let context = client.create_context(seat.as_str())?;
+            let context = client.create_context(vt)?;
             let outcome = (|| -> Result<std::process::ExitStatus> {
                 if activate {
-                    client.activate_context(context.as_fd())?;
+                    client.activate_context(context.id)?;
                 }
                 let raw = context.as_fd().as_raw_fd();
                 let mut child = std::process::Command::new(&command[0]);
                 child
                     .args(&command[1..])
                     .env("MULTISEATD_AUTHORITY_FD", raw.to_string())
-                    .env("MULTISEATD_CONTEXT_ID", context.id.to_string());
+                    .env("MULTISEATD_CONTEXT_ID", context.id.to_string())
+                    .env("XDG_SEAT", seat)
+                    .env_remove("XDG_VTNR");
+                if vt != 0 {
+                    child.env("XDG_VTNR", vt.to_string());
+                }
                 // SAFETY: only async-signal-safe descriptor operations occur in
                 // the post-fork callback. The target is explicitly trusted with
                 // FULL context authority, unlike an ordinary compositor/app.
@@ -99,8 +109,14 @@ pub fn contexts(command: ContextCommand, seconds: u64) -> Result<String> {
                 child.status().context("launch trusted context controller")
             })();
             let cleanup = client.remove_context_by_id(context.id);
-            let status = outcome?;
-            cleanup?;
+            let status = match (outcome, cleanup) {
+                (Ok(status), Ok(())) => status,
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(error)) => return Err(error.into()),
+                (Err(error), Err(cleanup)) => {
+                    bail!("{error:#}; context teardown also failed: {cleanup}")
+                }
+            };
             if !status.success() {
                 bail!("trusted context controller exited with {status}")
             }
@@ -111,22 +127,8 @@ pub fn contexts(command: ContextCommand, seconds: u64) -> Result<String> {
         }
     }
 }
-pub fn connections(command: ConnectionCommand, seconds: u64) -> Result<String> {
-    let client = client(seconds)?;
-    match command {
-        ConnectionCommand::List { seat } => {
-            let rows: Vec<_> = client
-                .list_connections()?
-                .into_iter()
-                .filter(|row| seat.as_ref().is_none_or(|seat| seat.as_str() == row.2))
-                .collect();
-            Ok(output::connections(&rows))
-        }
-        ConnectionCommand::Remove { connection } => {
-            client.remove_connection_by_id(connection)?;
-            Ok(format!(
-                "Removed connection {connection}; no process was terminated.\n"
-            ))
-        }
-    }
+pub fn disconnect(raw: i32) -> Result<String> {
+    let fd = authority(raw)?;
+    libmultiseatd::remove_connection(fd.as_fd())?;
+    Ok("Shut down connection; no process was terminated.\n".into())
 }

@@ -1,20 +1,16 @@
 use lib_sessiond::Session;
-use libmultiseatd::{ConnectionRow, ContextRow, SeatRow};
+use libmultiseatd::ContextInfo;
 use seat_udev::{SeatDevice, SeatName};
 use std::fmt::Write;
 use std::path::PathBuf;
 
-pub fn seats(seats: &[SeatRow]) -> String {
+pub fn seats(seats: &[String]) -> String {
     if seats.is_empty() {
         return "No seats.\n".into();
     }
-    let mut output = "SEAT  VT  FOREGROUND  SELECTED  EFFECTIVE  PHASE  CLEANUP\n".to_owned();
-    for (name, vt, foreground, selected, effective, phase, cleanup) in seats {
-        writeln!(
-            output,
-            "{name}  {vt}  {foreground}  {selected}  {effective}  {phase}  {cleanup}"
-        )
-        .expect("String write");
+    let mut output = "CONFIGURED SEAT\n".to_owned();
+    for name in seats {
+        writeln!(output, "{name}").expect("String write");
     }
     output
 }
@@ -77,35 +73,34 @@ pub fn scope_of(pid: u32, scope: &str) -> String {
     format!("{:>pid_width$}  SCOPE\n{pid:>pid_width$}  {scope}\n", "PID")
 }
 
-pub fn contexts(contexts: &[ContextRow]) -> String {
+pub fn contexts(contexts: &[ContextInfo]) -> String {
     if contexts.is_empty() {
         return "No contexts.\n".into();
     }
-    let mut output =
-        "CONTEXT  SEAT  PHASE  UIDS  SELECTED  EFFECTIVE  CONNECTIONS  CLEANUP\n".to_owned();
-    for (id, seat, phase, users, connections, selected, effective, cleanup) in contexts {
-        let users = users
+    let mut output = "CONTEXT  VT  UIDS  ACTIVE  FOREGROUND  EFFECTIVE  CONNECTIONS\n".to_owned();
+    for context in contexts {
+        let users = context
+            .desired_uids
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(",");
         writeln!(
             output,
-            "{id}  {seat}  {phase}  {users}  {selected}  {effective}  {}  {cleanup}",
-            connections.join(",")
+            "{}  {}  {users}  {}  {}  {}  {}",
+            context.id,
+            context.vt,
+            context.active,
+            context.foreground,
+            context.effective,
+            context
+                .connection_handles
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         )
         .expect("String write");
-    }
-    output
-}
-
-pub fn connections(connections: &[ConnectionRow]) -> String {
-    if connections.is_empty() {
-        return "No connections.\n".into();
-    }
-    let mut output = "CONNECTION  CONTEXT  SEAT  STATE  CLEANUP\n".to_owned();
-    for (id, context, seat, state, cleanup) in connections {
-        writeln!(output, "{id}  {context}  {seat}  {state}  {cleanup}").expect("String write");
     }
     output
 }
@@ -168,7 +163,6 @@ mod tests {
         assert_eq!(sessions(&[]), "No sessions.\n");
         assert_eq!(scopes(&[]), "No matching scopes.\n");
         assert_eq!(contexts(&[]), "No contexts.\n");
-        assert_eq!(connections(&[]), "No connections.\n");
     }
 
     #[test]
@@ -198,12 +192,21 @@ mod tests {
     }
 
     #[test]
-    fn renders_scope_lookup_and_connections_without_process_kill_language() {
+    fn renders_scope_lookup_and_seven_context_fields() {
         assert_eq!(scope_of(99, ""), "PID 99 is not in a managed scope.\n");
-        assert_eq!(
-            connections(&[("opaque-id".into(), "context-id".into(), "seat0".into(), "pending-disable".into(), String::new())]),
-            "CONNECTION  CONTEXT  SEAT  STATE  CLEANUP\nopaque-id  context-id  seat0  pending-disable  \n"
-        );
+        let id = "01900000-0000-7000-8000-000000000000".parse().unwrap();
+        let text = contexts(&[ContextInfo {
+            id,
+            vt: 7,
+            desired_uids: vec![1000],
+            connection_handles: vec![1, 2],
+            active: true,
+            foreground: true,
+            effective: true,
+        }]);
+        assert!(text.contains("7  1000  true  true  true  1,2"));
+        assert!(!text.contains("CLEANUP"));
+        assert!(!text.contains("PHASE"));
     }
 
     #[test]

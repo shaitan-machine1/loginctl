@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use lib_scoped::{ScopeId, TargetId};
-use libmultiseatd::{ConnectionId, ContextId};
+use libmultiseatd::ContextId;
 use seat_udev::SeatName;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -44,19 +44,20 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum SeatCommand {
-    /// List seats managed by multiseatd.
+    /// List explicitly configured seats (not runtime discovery).
     List,
     /// Show udev seats, devices, and persistent assignments.
     Status,
     /// Inspect and control capability-authorized contexts (not processes).
     Context {
+        seat: SeatName,
         #[command(subcommand)]
         command: ContextCommand,
     },
-    /// Inspect or remove independent seatd connections.
-    Connection {
-        #[command(subcommand)]
-        command: ConnectionCommand,
+    /// Shut down a possessed inherited seatd endpoint; never a context/ID credential.
+    Disconnect {
+        #[arg(long, value_parser = clap::value_parser!(i32).range(3..))]
+        connection_fd: i32,
     },
     /// Assign a complete ID_FOR_SEAT device group to a seat.
     Assign { device: PathBuf, seat: SeatName },
@@ -68,9 +69,7 @@ pub enum SeatCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
-    List {
-        seat: Option<SeatName>,
-    },
+    List,
     Show {
         context: ContextId,
     },
@@ -80,12 +79,17 @@ pub enum ContextCommand {
     Deactivate {
         context: ContextId,
     },
+    /// Request foreground without activating/replacing a context.
+    Foreground {
+        context: ContextId,
+    },
     Remove {
         context: ContextId,
     },
     /// Delegate full authority to an explicitly trusted controller until exit.
     Create {
-        seat: SeatName,
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=63))]
+        vt: u32,
         #[arg(long)]
         activate: bool,
         #[arg(last = true, required = true)]
@@ -106,12 +110,6 @@ pub enum ContextCommand {
         authority_fd: i32,
         uid: u32,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ConnectionCommand {
-    List { seat: Option<SeatName> },
-    Remove { connection: ConnectionId },
 }
 
 #[derive(Debug, Subcommand)]
@@ -274,14 +272,16 @@ mod tests {
         for args in [
             vec!["loginctl", "seat", "list"],
             vec!["loginctl", "seat", "status"],
-            vec!["loginctl", "seat", "context", "list"],
-            vec!["loginctl", "seat", "connection", "list"],
+            vec!["loginctl", "seat", "context", "seat0", "list"],
+            vec!["loginctl", "seat", "disconnect", "--connection-fd", "3"],
             vec![
                 "loginctl",
                 "seat",
                 "context",
-                "create",
                 "seat0",
+                "create",
+                "--vt",
+                "7",
                 "--",
                 "trusted-controller",
             ],
@@ -289,18 +289,19 @@ mod tests {
                 "loginctl",
                 "seat",
                 "context",
+                "seat1",
                 "grant",
                 "--authority-fd",
                 "3",
                 "1000",
             ],
-            vec!["loginctl", "seat", "context", "list", "seat0"],
             vec![
                 "loginctl",
                 "seat",
-                "connection",
-                "remove",
-                "01900000-0000-4000-8000-000000000000",
+                "context",
+                "seat0",
+                "foreground",
+                "01900000-0000-7000-8000-000000000000",
             ],
             vec!["loginctl", "seat", "assign", "/dev/dri/card0", "seat1"],
             vec!["loginctl", "seat", "unassign", "/dev/dri/card0"],
@@ -350,10 +351,13 @@ mod tests {
         assert!(Args::try_parse_from(["loginctl", "acl", "status"]).is_err());
         for id in [
             "bad",
-            "01900000-0000-7000-8000-000000000000",
+            "01900000-0000-4000-8000-000000000000",
             "01900000-0000-7000-C000-000000000000",
         ] {
-            assert!(Args::try_parse_from(["loginctl", "seat", "context", "remove", id]).is_err());
+            assert!(
+                Args::try_parse_from(["loginctl", "seat", "context", "seat0", "remove", id])
+                    .is_err()
+            );
         }
     }
 }
