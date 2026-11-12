@@ -285,8 +285,8 @@ dependencies = [
 
 [[package]]
 name = "lib-scoped"
-version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=27ef72702556cf1018888eac25aaf655a6efd743#27ef72702556cf1018888eac25aaf655a6efd743"
+version = "0.1.1"
+source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=c87c83d8929fbe0fe63d0012324fbd7f957e98c0#c87c83d8929fbe0fe63d0012324fbd7f957e98c0"
 dependencies = [
  "libc",
  "nix",
@@ -296,8 +296,8 @@ dependencies = [
 
 [[package]]
 name = "lib-sessiond"
-version = "0.1.0"
-source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=27ef72702556cf1018888eac25aaf655a6efd743#27ef72702556cf1018888eac25aaf655a6efd743"
+version = "0.1.1"
+source = "git+https://github.com/shaitan-machine1/sessiond.git?rev=c87c83d8929fbe0fe63d0012324fbd7f957e98c0#c87c83d8929fbe0fe63d0012324fbd7f957e98c0"
 dependencies = [
  "anyhow",
  "dbus",
@@ -344,7 +344,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "loginctl"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",

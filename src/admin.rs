@@ -378,6 +378,26 @@ pub(crate) fn service_call<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_inventory_accepts_user_manager_min_uid_config() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sessiond.conf");
+        std::fs::write(
+            &path,
+            format!(
+                "cgroup_root = {:?}\n[user_service_manager]\nmin_uid = 500\n",
+                root.path()
+            ),
+        )
+        .unwrap();
+        let config = SessionConfig::load(&path).unwrap();
+        assert_eq!(config.user_service_manager.min_uid, 500);
+        let core = SessionCore::new(config).unwrap();
+        assert!(core.list_sessions().unwrap().is_empty());
+        assert!(!root.path().join("sessiond").exists());
+    }
+
     #[test]
     fn unavailable_services_get_a_clear_component_error() {
         let error =

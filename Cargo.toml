@@ -1,6 +1,6 @@
 [package]
 name = "loginctl"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 license = "GPL-3.0-only"
 rust-version = "1.89"
@@ -12,8 +12,8 @@ clap = { version = "4.5.60", features = ["derive"] }
 dbus = "0.9.12"
 uuid = "1"
 libc = "0.2.191"
-lib-scoped = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "27ef72702556cf1018888eac25aaf655a6efd743" }
-lib-sessiond = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "27ef72702556cf1018888eac25aaf655a6efd743" }
+lib-scoped = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "c87c83d8929fbe0fe63d0012324fbd7f957e98c0" }
+lib-sessiond = { git = "https://github.com/shaitan-machine1/sessiond.git", rev = "c87c83d8929fbe0fe63d0012324fbd7f957e98c0" }
 lib-multiseatd = { git = "https://github.com/shaitan-machine1/multiseatd.git", tag = "v0.4.0" }
 seat-udev = { git = "https://github.com/shaitan-machine1/multiseatd.git", tag = "v0.4.0", features = ["assign"] }
 
