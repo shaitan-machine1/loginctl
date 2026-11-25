@@ -118,7 +118,7 @@ pub enum ContextCommand {
 pub enum SessionCommand {
     /// List managed sessions.
     List,
-    /// Close a session and wait for complete daemon teardown.
+    /// Wait for session-tree removal, not shared manager/runtime reconciliation.
     Close {
         #[arg(value_parser = parse_session_id)]
         session: String,
@@ -321,13 +321,13 @@ mod tests {
             vec!["loginctl", "scope", "terminate", SCOPE],
             vec!["loginctl", "scope", "kill", SCOPE],
             vec!["loginctl", "scope", "target", "list", SCOPE],
-            vec!["loginctl", "scope", "target", "show", SCOPE, "leader"],
+            vec!["loginctl", "scope", "target", "show", SCOPE, "master"],
             vec![
-                "loginctl", "scope", "target", "assign", SCOPE, "leader", "123",
+                "loginctl", "scope", "target", "assign", SCOPE, "master", "123",
             ],
-            vec!["loginctl", "scope", "target", "remove", SCOPE, "leader"],
-            vec!["loginctl", "scope", "target", "terminate", SCOPE, "leader"],
-            vec!["loginctl", "scope", "target", "kill", SCOPE, "leader"],
+            vec!["loginctl", "scope", "target", "remove", SCOPE, "master"],
+            vec!["loginctl", "scope", "target", "terminate", SCOPE, "master"],
+            vec!["loginctl", "scope", "target", "kill", SCOPE, "master"],
             vec!["loginctl", "scope", "watch", SCOPE],
             vec!["loginctl", "pam", "status"],
             vec!["loginctl", "pam", "activate"],

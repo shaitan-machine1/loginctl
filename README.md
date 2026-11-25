@@ -1,13 +1,13 @@
 # loginctl
 
 Synchronous administrator for the decoupled login stack. It has no async
-runtime. Session inventory and scope operations call `lib-sessiond` and
-`lib-scoped` directly; daemon-backed seat/session-close calls use blocking
-clients owned by the corresponding API crates. A missing component does not
+runtime. All session queries and close operations use `lib-sessiond`'s authenticated
+blocking daemon client; generic scope operations use `lib-scoped` directly.
+Seat operations use the corresponding blocking component client. A missing component does not
 break unrelated command groups.
 
 The binary never invokes `sudo`. Direct cgroup operations use the caller's
-permissions and are not coordinated with sessiond's per-UID lifecycle lock, so
+permissions and are not coordinated with sessiond's per-UID effect lanes, so
 mutating sessiond-owned scopes can be disruptive.
 
 ## Commands
@@ -47,9 +47,14 @@ loginctl pam status|activate|deactivate
 
 `--cgroup-root` selects the cgroup-v2 mount for direct scope commands.
 `--timeout-seconds` bounds blocking D-Bus, watch, and assignment operations.
-Session list is containment-derived and includes recorded leader PID/start
-identity without probing liveness. Session close uses `CloseSessionAndWait` and
-refuses to block from the target session or that user's service subtree.
+Session list needs sessiond, not its configuration or local containment access.
+It displays `SESSION`, `UID`, `RUNTIME_DIR`, `MASTER`, `START`; master tracking is
+queried separately, with `-` for missing tracking and concurrently removed
+sessions omitted. Inventory does not probe liveness or certify readiness.
+Session close uses `CloseSession`: only actual session-tree removal prints
+success, not Pending/timeouts/errors or later manager/runtime reconciliation.
+The daemon authoritatively refuses a waiting caller inside the target subtree.
+Typed sessiond errors and named remote categories remain in diagnostics.
 
 Scope IDs are fully qualified: their first segment identifies the explicit
 lib-scoped domain. Scope removal is single-node and nonrecursive. Moving a
@@ -97,13 +102,25 @@ Seat movement/listing requires 1–256 unique valid explicit participants. There
 is no wildcard, discovery or implicit default pair. Missing/invalid seat lists
 do not prevent unrelated session, scope or PAM commands.
 
-Activation atomically places the managed block before the sole active session
-`pam_env.so` entry while preserving metadata and a timestamped backup.
-Malformed, duplicated, partially edited, or ambiguously anchored policies are
-rejected rather than repaired implicitly. The managed block and diagnostics
-contain only `pam_sessiond.so`. Activation can migrate the exact historical
-loginctl-owned two-module block to the sessiond-only block; unrelated PAM ACL
-entries are neither detected nor managed.
+Activation inserts the following before the sole active session `pam_env.so`
+anchor when no block exists, preserving metadata and a timestamped backup:
+
+```pam
+# BEGIN sglogin
+session include sessiond-session
+# END sglogin
+```
+
+An existing well-formed block is replaced **in place**, regardless of edited
+interior contents, without requiring an anchor or relocating the block.
+Deactivation removes any marked contents. Outside text is preserved. Unmatched,
+duplicate or ambiguous boundaries are rejected. Only these markers are
+recognized: there is no historical-marker migration.
+
+Loginctl does not read/validate the included fragment, module availability,
+required/optional policy, daemon readiness or other sessiond entries. Sessiond
+owns the named include: required local core and optional daemon readiness.
+Builds/tests never activate installed PAM.
 
 ## Development
 
@@ -121,5 +138,6 @@ to additionally exercise successful root-owned routing, shared seven-field recor
 all-removals-before-additions and offline-participant failure. No test writes
 host PAM, assignments or production cgroups.
 
-Library dependencies use public HTTPS Git sources, with exact revisions recorded
-in Cargo.toml/Cargo.lock. All component clients remain synchronous and executor-free.
+Library dependencies use public HTTPS Git sources, with exact sessiond 0.2.0
+SDK/scoped revisions recorded in Cargo.toml/Cargo.lock. Multiseatd pins are
+unchanged. All component clients remain synchronous and executor-free.

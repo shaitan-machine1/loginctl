@@ -1,4 +1,9 @@
-use lib_sessiond::Session;
+use lib_sessiond::SessionInfo;
+
+pub struct SessionRow {
+    pub session: SessionInfo,
+    pub master: Option<(u32, u64)>,
+}
 use libmultiseatd::ContextInfo;
 use seat_udev::{SeatDevice, SeatName};
 use std::fmt::Write;
@@ -11,6 +16,13 @@ pub fn failure(error: &anyhow::Error) -> String {
         if let Some(name) = remote.name() {
             write!(text, " [{name}]").expect("String write");
         }
+    }
+    if let Some(session) = error.downcast_ref::<lib_sessiond::Error>() {
+        write!(text, " [sessiond {:?}", session.code).expect("String write");
+        if let Some(name) = &session.remote_name {
+            write!(text, ": {name}").expect("String write");
+        }
+        text.push(']');
     }
     if let Some(refresh) = error.downcast_ref::<libmultiseatd::RefreshError>() {
         for failure in &refresh.failures {
@@ -33,41 +45,47 @@ pub fn seats(seats: &[String]) -> String {
     output
 }
 
-pub fn sessions(sessions: &[Session]) -> String {
+pub fn sessions(sessions: &[SessionRow]) -> String {
     if sessions.is_empty() {
         return "No sessions.\n".to_owned();
     }
     let session_width = sessions
         .iter()
-        .map(|session| session.id.len())
+        .map(|row| row.session.sid.len())
         .chain(["SESSION".len()])
         .max()
         .expect("heading provides a width");
     let uid_width = sessions
         .iter()
-        .map(|session| session.uid.to_string().len())
+        .map(|row| row.session.uid.to_string().len())
         .chain(["UID".len()])
         .max()
         .expect("heading provides a width");
+    let runtime_width = sessions
+        .iter()
+        .map(|row| row.session.runtime_dir.len())
+        .chain(["RUNTIME_DIR".len()])
+        .max()
+        .expect("heading width");
     let mut output = String::new();
     writeln!(
         output,
-        "{:<session_width$}  {:>uid_width$}  LEADER  START",
-        "SESSION", "UID"
+        "{:<session_width$}  {:>uid_width$}  {:<runtime_width$}  MASTER  START",
+        "SESSION", "UID", "RUNTIME_DIR"
     )
-    .expect("writing to String cannot fail");
-    for session in sessions {
-        let (leader, start) = session
-            .leader
-            .map_or(("-".to_owned(), "-".to_owned()), |identity| {
-                (identity.pid.to_string(), identity.start_time.to_string())
+    .expect("String write");
+    for row in sessions {
+        let (master, start) = row
+            .master
+            .map_or(("-".to_owned(), "-".to_owned()), |(pid, start)| {
+                (pid.to_string(), start.to_string())
             });
         writeln!(
             output,
-            "{:<session_width$}  {:>uid_width$}  {leader}  {start}",
-            session.id, session.uid
+            "{:<session_width$}  {:>uid_width$}  {:<runtime_width$}  {master}  {start}",
+            row.session.sid, row.session.uid, row.session.runtime_dir
         )
-        .expect("writing to String cannot fail");
+        .expect("String write");
     }
     output
 }
@@ -193,6 +211,16 @@ mod tests {
             .contains("seat0 Removal: org.SGLogin.Multiseatd1.Error.CriticalFailure"));
     }
     #[test]
+    fn session_errors_keep_typed_and_remote_categories() {
+        let error = anyhow::Error::new(lib_sessiond::Error {
+            code: lib_sessiond::ErrorCode::Pending,
+            message: "removal pending".into(),
+            remote_name: Some("org.SGLogin.Sessiond1.Error.Pending".into()),
+        });
+        assert!(failure(&error).contains("[sessiond Pending: org.SGLogin.Sessiond1.Error.Pending]"));
+    }
+
+    #[test]
     fn renders_explicit_empty_states() {
         assert_eq!(seats(&[]), "No seats.\n");
         assert_eq!(sessions(&[]), "No sessions.\n");
@@ -202,27 +230,35 @@ mod tests {
 
     #[test]
     fn renders_aligned_session_table_without_reordering() {
-        assert_eq!(
-            sessions(&[
-                Session {
-                    id: B.to_owned(),
+        let text = sessions(&[
+            SessionRow {
+                session: SessionInfo {
+                    sid: B.into(),
                     uid: 7,
-                    leader: None
+                    runtime_dir: "/run/user/7".into(),
                 },
-                Session {
-                    id: A.to_owned(),
+                master: None,
+            },
+            SessionRow {
+                session: SessionInfo {
+                    sid: A.into(),
                     uid: 1000,
-                    leader: Some(lib_scoped::ProcessIdentity {
-                        pid: 42,
-                        start_time: 99
-                    })
+                    runtime_dir: "/run/user/1000".into(),
                 },
-            ]),
-            concat!(
-                "SESSION                            UID  LEADER  START\n",
-                "1123456789abcdef0123456789abcdef     7  -  -\n",
-                "0123456789abcdef0123456789abcdef  1000  42  99\n",
-            )
+                master: Some((42, 99)),
+            },
+        ]);
+        let columns: Vec<Vec<&str>> = text
+            .lines()
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            columns,
+            [
+                vec!["SESSION", "UID", "RUNTIME_DIR", "MASTER", "START"],
+                vec![B, "7", "/run/user/7", "-", "-"],
+                vec![A, "1000", "/run/user/1000", "42", "99"]
+            ]
         );
     }
 

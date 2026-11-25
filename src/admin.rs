@@ -3,8 +3,7 @@ use crate::output;
 use anyhow::{anyhow, Context, Result};
 use lib_scoped::{Domain, ScopeId, TargetId, TargetStatus};
 use lib_sessiond::bus::Client as SessiondClient;
-use lib_sessiond::config::Config as SessionConfig;
-use lib_sessiond::SessionCore;
+use lib_sessiond::ErrorCode as SessionErrorCode;
 use seat_udev::assign::{Assigner, AssignmentGroup, RealAssignmentBackend};
 use seat_udev::{Context as UdevContext, Filter};
 use std::fmt::Write as FmtWrite;
@@ -91,15 +90,35 @@ const REFRESH_INSTRUCTION: &str =
     "Run `loginctl seat refresh` explicitly to apply assignments to running seats.\n";
 
 pub fn session(command: SessionCommand, timeout_seconds: u64) -> Result<String> {
+    let client = SessiondClient::system(timeout(timeout_seconds))
+        .context("sessiond service is unavailable or cannot be authenticated")?;
+    session_with_client(command, &client)
+}
+/// All session inventory and safety checks are authoritative daemon operations.
+pub fn session_with_client(command: SessionCommand, client: &SessiondClient) -> Result<String> {
     match command {
-        SessionCommand::List => Ok(output::sessions(&session_core()?.list_sessions()?)),
+        SessionCommand::List => {
+            let mut rows = Vec::new();
+            for session in client
+                .list_sessions()
+                .context("call sessiond ListSessions")?
+            {
+                let master = match client.get_session_master_pid(&session.sid) {
+                    Ok(pair) => Some(pair),
+                    Err(error) if error.code == SessionErrorCode::MasterNotRecorded => None,
+                    Err(error) if error.code == SessionErrorCode::SessionNotFound => continue,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("call sessiond GetSessionMasterPid for {}", session.sid)
+                        })
+                    }
+                };
+                rows.push(output::SessionRow { session, master });
+            }
+            Ok(output::sessions(&rows))
+        }
         SessionCommand::Close { session } => {
-            ensure_blocking_close_is_external(&session)?;
-            let client = SessiondClient::system(timeout(timeout_seconds))
-                .context("connect to the system bus for sessiond")?;
-            client
-                .close_session(&session)
-                .with_context(|| format!("call sessiond CloseSessionAndWait for {session}"))?;
+            client.close_session(&session).with_context(|| format!("call sessiond CloseSession for {session}; failure or Pending does not certify removal"))?;
             Ok(format!("Closed session {session}.\n"))
         }
     }
@@ -280,37 +299,6 @@ fn create_domain(cgroup_root: &Path, scope: &ScopeId) -> Result<Domain> {
     Ok(Domain::create(cgroup_root, domain_name(scope))?)
 }
 
-fn session_core() -> Result<SessionCore> {
-    let path = Path::new("/etc/sessiond.conf");
-    let config = if path.exists() {
-        SessionConfig::load(path)?
-    } else {
-        SessionConfig::default()
-    };
-    Ok(SessionCore::new(config)?)
-}
-fn ensure_blocking_close_is_external(sid: &str) -> Result<()> {
-    let core = session_core()?;
-    let Some(session) = core.find_session(sid)? else {
-        return Ok(());
-    };
-    let domain = match Domain::open(&core.config().cgroup_root, "sessiond") {
-        Ok(domain) => domain,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let Some(current) = domain.scope_of(std::process::id())? else {
-        return Ok(());
-    };
-    let session_root = lib_scoped::well_known::sessiond_user_session(session.uid, sid)?;
-    let service_root = lib_scoped::well_known::sessiond_user_service(session.uid);
-    if current.is_or_is_under(&session_root) || current.is_or_is_under(&service_root) {
-        return Err(anyhow!(
-            "blocking close from {current} could terminate the caller; use a scheduling-only client"
-        ));
-    }
-    Ok(())
-}
 fn seat_status(timeout_seconds: u64) -> Result<String> {
     let assigner = assigner(timeout_seconds);
     let context = UdevContext::new().context("read udev seat topology")?;
@@ -378,25 +366,6 @@ pub(crate) fn service_call<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn session_inventory_accepts_user_manager_min_uid_config() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("sessiond.conf");
-        std::fs::write(
-            &path,
-            format!(
-                "cgroup_root = {:?}\n[user_service_manager]\nmin_uid = 500\n",
-                root.path()
-            ),
-        )
-        .unwrap();
-        let config = SessionConfig::load(&path).unwrap();
-        assert_eq!(config.user_service_manager.min_uid, 500);
-        let core = SessionCore::new(config).unwrap();
-        assert!(core.list_sessions().unwrap().is_empty());
-        assert!(!root.path().join("sessiond").exists());
-    }
 
     #[test]
     fn unavailable_services_get_a_clear_component_error() {

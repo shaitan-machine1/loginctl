@@ -16,6 +16,15 @@ use std::sync::{
 };
 use std::time::Duration;
 const CONTEXT_ID: &str = "01900000-0000-7000-8000-000000000002";
+const SESSION: &str = "0123456789abcdef0123456789abcdef";
+const MISSING_MASTER: &str = "1123456789abcdef0123456789abcdef";
+const REMOVED: &str = "2123456789abcdef0123456789abcdef";
+fn session_error(kind: &str) -> dbus::MethodErr {
+    dbus::MethodErr::from((
+        format!("org.SGLogin.Sessiond1.Error.{kind}"),
+        "deliberate fixture result",
+    ))
+}
 struct PrivateBus {
     pid: i32,
     old_address: Option<String>,
@@ -66,11 +75,33 @@ impl Server {
         }
         let mut crossroads = Crossroads::new();
         let session = crossroads.register(lib_sessiond::bus::INTERFACE_NAME, |builder| {
+            builder.method("ListSessions", (), ("sessions",), |_, _, ()| {
+                Ok((vec![
+                    (SESSION.to_owned(), 1000u32, "/run/user/1000".to_owned()),
+                    (MISSING_MASTER.to_owned(), 7u32, "/run/user/7".to_owned()),
+                    (REMOVED.to_owned(), 8u32, "/run/user/8".to_owned()),
+                ],))
+            });
             builder.method(
-                "CloseSessionAndWait",
+                "GetSessionMasterPid",
+                ("sid",),
+                ("pid", "start_time"),
+                |_, _, (sid,): (String,)| match sid.as_str() {
+                    SESSION => Ok((42u32, 99u64)),
+                    MISSING_MASTER => Err(session_error("MasterNotRecorded")),
+                    REMOVED => Err(session_error("SessionNotFound")),
+                    _ => Err(session_error("BackendError")),
+                },
+            );
+            builder.method(
+                "CloseSession",
                 ("sid",),
                 (),
-                |_, _, (_sid,): (String,)| Ok(()),
+                |_, _, (sid,): (String,)| match sid.as_str() {
+                    SESSION => Ok(()),
+                    MISSING_MASTER => Err(session_error("Pending")),
+                    _ => Err(session_error("InvalidArgument")),
+                },
             );
         });
         let seat = seat.to_owned();
@@ -173,7 +204,7 @@ impl Drop for Server {
     }
 }
 #[test]
-fn explicit_routing_refresh_root_owner_and_unchanged_session_scope_clients() {
+fn explicit_routing_refresh_root_owner_and_daemon_session_scope_clients() {
     let _bus = PrivateBus::start();
     let events = Arc::new(Mutex::new(Vec::new()));
     let first = Server::start("seat0", events.clone());
@@ -265,15 +296,52 @@ fn explicit_routing_refresh_root_owner_and_unchanged_session_scope_clients() {
     .contains("no process was terminated"));
     let mut byte = [0];
     assert_eq!(std::io::Read::read(&mut &peer, &mut byte).unwrap(), 0);
-    assert!(admin::session(
-        SessionCommand::Close {
-            session: "0123456789abcdef0123456789abcdef".into()
-        },
-        2
-    )
-    .unwrap()
-    .contains("Closed session"));
+    // Session commands never read daemon configuration or local containment.
+    // A nonroot mock is not permitted to impersonate sessiond, even for reads.
+    if unsafe { libc::geteuid() } == 0 {
+        let listing = admin::session(SessionCommand::List, 2).unwrap();
+        assert!(listing.lines().next().unwrap().contains("RUNTIME_DIR"));
+        assert!(listing.contains("/run/user/1000") && listing.contains("42  99"));
+        assert!(listing.contains(MISSING_MASTER));
+        assert!(!listing.contains(REMOVED));
+        assert!(admin::session(
+            SessionCommand::Close {
+                session: SESSION.into()
+            },
+            2
+        )
+        .unwrap()
+        .contains("Closed session"));
+        let pending = admin::session(
+            SessionCommand::Close {
+                session: MISSING_MASTER.into(),
+            },
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(
+            pending.downcast_ref::<lib_sessiond::Error>().unwrap().code,
+            lib_sessiond::ErrorCode::Pending
+        );
+        assert!(loginctl::output::failure(&pending).contains("org.SGLogin.Sessiond1.Error.Pending"));
+        let rejected = admin::session(
+            SessionCommand::Close {
+                session: REMOVED.into(),
+            },
+            2,
+        )
+        .unwrap_err();
+        assert!(loginctl::output::failure(&rejected).contains("InvalidArgument"));
+    } else {
+        let rejected = admin::session(SessionCommand::List, 2).unwrap_err();
+        assert_eq!(
+            rejected.downcast_ref::<lib_sessiond::Error>().unwrap().code,
+            lib_sessiond::ErrorCode::NotAuthorized
+        );
+    }
     drop(first);
+    let absent = admin::session(SessionCommand::List, 1).unwrap_err();
+    assert!(format!("{absent:#}").contains("sessiond service is unavailable"));
     let unavailable = admin::seat(
         SeatCommand::Context {
             seat: seat_udev::SeatName::seat0(),

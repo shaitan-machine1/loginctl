@@ -6,435 +6,274 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const BEGIN: &str = "# BEGIN decoupling-loginctl";
-const END: &str = "# END decoupling-loginctl";
-pub const MANAGED_BLOCK: &str = concat!(
-    "# BEGIN decoupling-loginctl\n",
-    "-session    optional    pam_sessiond.so timeout=30s\n",
-    "# END decoupling-loginctl\n",
-);
-const LEGACY_BLOCK: &str = concat!(
-    "# BEGIN decoupling-loginctl\n",
-    "-session    optional    pam_sessiond.so timeout=30s\n",
-    "-session    optional    pam_aclad.so timeout=30s\n",
-    "# END decoupling-loginctl\n",
-);
-const SESSIOND_MODULE: &str = "/usr/lib/security/pam_sessiond.so";
-
+const BEGIN: &str = "# BEGIN sglogin";
+const END: &str = "# END sglogin";
+pub const MANAGED_BLOCK: &str =
+    "# BEGIN sglogin\nsession include sessiond-session\n# END sglogin\n";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockState {
     Inactive,
     Active,
-    Moved,
     Malformed,
 }
-
 impl BlockState {
     fn label(self) -> &'static str {
         match self {
             Self::Inactive => "inactive",
             Self::Active => "active",
-            Self::Moved => "moved",
             Self::Malformed => "malformed",
         }
     }
 }
-
 #[derive(Debug)]
 pub struct Status {
     pub target: PathBuf,
     pub state: BlockState,
-    pub sessiond_entries: usize,
+    pub canonical: bool,
     pub env_anchors: usize,
-    pub modules_before_env: bool,
-    pub sessiond_module_exists: bool,
+    pub before_env: bool,
     detail: Option<String>,
 }
-
 impl Status {
     pub fn render(&self) -> String {
-        let ordering = if self.env_anchors != 1 {
-            "ambiguous"
-        } else if self.modules_before_env {
-            "before pam_env"
-        } else {
-            "not before pam_env"
-        };
-        let mut output = format!(
-            concat!(
-                "PAM file: {}\n",
-                "Managed block: {}\n",
-                "pam_sessiond.so entries: {}\n",
-                "session pam_env.so anchors: {}\n",
-                "Module ordering: {}\n",
-                "{}: {}\n"
-            ),
-            self.target.display(),
-            self.state.label(),
-            self.sessiond_entries,
-            self.env_anchors,
-            ordering,
-            SESSIOND_MODULE,
-            exists_label(self.sessiond_module_exists),
-        );
+        let mut output = format!("PAM file: {}\nManaged block: {}\nCanonical include: {}\nSession pam_env.so anchors: {}\nBlock before pam_env: {}\n", self.target.display(), self.state.label(), self.canonical, self.env_anchors, self.before_env);
         if let Some(detail) = &self.detail {
-            output.push_str("Detail: ");
-            output.push_str(detail);
-            output.push('\n');
+            output.push_str(&format!("Detail: {detail}\n"));
         }
         output
     }
 }
-
-#[derive(Debug)]
 struct Analysis {
     state: BlockState,
-    block_range: Option<(usize, usize)>,
-    anchors: Vec<(usize, usize)>,
-    sessiond_entries: Vec<usize>,
+    range: Option<(usize, usize)>,
+    anchors: Vec<usize>,
     detail: Option<String>,
 }
-
 pub fn status(path: &Path) -> Result<Status> {
-    status_from(path, Path::new(SESSIOND_MODULE))
-}
-
-pub fn activate(path: &Path) -> Result<String> {
-    ensure_root()?;
-    activate_impl(path)
-}
-
-pub fn deactivate(path: &Path) -> Result<String> {
-    ensure_root()?;
-    deactivate_impl(path)
-}
-
-fn status_from(path: &Path, sessiond_module: &Path) -> Result<Status> {
     let (contents, _) = read_target(path)?;
     let analysis = analyze(&contents);
-    let env_start = analysis.anchors.first().map(|anchor| anchor.0);
-    let modules_before_env = env_start.is_some_and(|anchor| {
-        !analysis.sessiond_entries.is_empty()
-            && analysis
-                .sessiond_entries
-                .iter()
-                .all(|offset| *offset < anchor)
-    });
     Ok(Status {
-        target: path.to_owned(),
+        target: path.into(),
         state: analysis.state,
-        sessiond_entries: analysis.sessiond_entries.len(),
+        canonical: analysis
+            .range
+            .is_some_and(|(a, b)| &contents[a..b] == MANAGED_BLOCK),
         env_anchors: analysis.anchors.len(),
-        modules_before_env,
-        sessiond_module_exists: sessiond_module.is_file(),
+        before_env: analysis.range.is_some_and(|(_, end)| {
+            analysis
+                .anchors
+                .first()
+                .is_some_and(|anchor| end <= *anchor)
+        }),
         detail: analysis.detail,
     })
 }
-
-fn activate_impl(path: &Path) -> Result<String> {
-    let _lock = Lock::acquire(path, libc::LOCK_EX)?;
+pub fn activate(path: &Path) -> Result<String> {
+    ensure_root()?;
+    change(path, true)
+}
+pub fn deactivate(path: &Path) -> Result<String> {
+    ensure_root()?;
+    change(path, false)
+}
+fn change(path: &Path, activate: bool) -> Result<String> {
+    let _lock = Lock::acquire(path)?;
     let (contents, metadata) = read_target(path)?;
     let analysis = analyze(&contents);
-    match analysis.state {
-        BlockState::Malformed => bail!(
-            "refusing to activate: {}",
-            analysis
-                .detail
-                .as_deref()
-                .unwrap_or("malformed managed block")
-        ),
-        BlockState::Moved => {
-            bail!("refusing to activate: the exact managed block is not immediately before pam_env")
+    if analysis.state == BlockState::Malformed {
+        bail!(
+            "refusing PAM edit: {}",
+            analysis.detail.as_deref().unwrap_or("ambiguous markers")
+        );
+    }
+    let (start, end) = match analysis.range {
+        Some(range) => range,
+        None if !activate => {
+            return Ok(format!(
+                "PAM integration is already inactive in {}.\n",
+                path.display()
+            ))
         }
-        BlockState::Active => {
+        None => {
             if analysis.anchors.len() != 1 {
                 bail!(
                     "refusing to activate: expected one session pam_env.so anchor, found {}",
                     analysis.anchors.len()
                 );
             }
-            let (start, end) = analysis.block_range.expect("active block has a range");
-            if &contents[start..end] == LEGACY_BLOCK {
-                let mut updated = String::with_capacity(contents.len());
-                updated.push_str(&contents[..start]);
-                updated.push_str(MANAGED_BLOCK);
-                updated.push_str(&contents[end..]);
-                let backup = backup(path, contents.as_bytes(), &metadata)?;
-                atomic_replace(path, updated.as_bytes(), &metadata)?;
-                return Ok(format!(
-                    "Updated PAM integration in {}.\nBackup: {}\n",
-                    path.display(),
-                    backup.display()
-                ));
-            }
-            return Ok(format!(
-                "PAM integration is already active in {}.\n",
-                path.display()
-            ));
+            (analysis.anchors[0], analysis.anchors[0])
         }
-        BlockState::Inactive => {}
+    };
+    let replacement = if activate { MANAGED_BLOCK } else { "" };
+    if &contents[start..end] == replacement {
+        return Ok(format!(
+            "PAM integration is already active in {}.\n",
+            path.display()
+        ));
     }
-    if analysis.anchors.len() != 1 {
-        bail!(
-            "refusing to activate: expected one session pam_env.so anchor, found {}",
-            analysis.anchors.len()
-        );
-    }
-    let anchor = analysis.anchors[0].0;
-    let mut updated = String::with_capacity(contents.len() + MANAGED_BLOCK.len());
-    updated.push_str(&contents[..anchor]);
-    updated.push_str(MANAGED_BLOCK);
-    updated.push_str(&contents[anchor..]);
-    let backup = backup(path, contents.as_bytes(), &metadata)?;
+    let updated = format!("{}{replacement}{}", &contents[..start], &contents[end..]);
+    let saved = backup(path, contents.as_bytes(), &metadata)?;
     atomic_replace(path, updated.as_bytes(), &metadata)?;
     Ok(format!(
-        "Activated PAM integration in {}.\nBackup: {}\n",
+        "{} PAM integration in {}.\nBackup: {}\n",
+        if activate { "Updated" } else { "Deactivated" },
         path.display(),
-        backup.display()
+        saved.display()
     ))
 }
-
-fn deactivate_impl(path: &Path) -> Result<String> {
-    let _lock = Lock::acquire(path, libc::LOCK_EX)?;
-    let (contents, metadata) = read_target(path)?;
-    let analysis = analyze(&contents);
-    match analysis.state {
-        BlockState::Malformed => bail!(
-            "refusing to deactivate: {}",
-            analysis
-                .detail
-                .as_deref()
-                .unwrap_or("malformed managed block")
-        ),
-        BlockState::Inactive => {
-            return Ok(format!(
-                "PAM integration is already inactive in {}.\n",
-                path.display()
-            ));
-        }
-        BlockState::Active | BlockState::Moved => {}
-    }
-    let (start, end) = analysis
-        .block_range
-        .context("exact managed block range is unavailable")?;
-    let mut updated = String::with_capacity(contents.len() - (end - start));
-    updated.push_str(&contents[..start]);
-    updated.push_str(&contents[end..]);
-    let backup = backup(path, contents.as_bytes(), &metadata)?;
-    atomic_replace(path, updated.as_bytes(), &metadata)?;
-    Ok(format!(
-        "Deactivated PAM integration in {}.\nBackup: {}\n",
-        path.display(),
-        backup.display()
-    ))
-}
-
 fn analyze(contents: &str) -> Analysis {
+    let mut markers = Vec::new();
     let mut anchors = Vec::new();
-    let mut sessiond_entries = Vec::new();
-    let mut exact_markers = 0;
-    let mut marker_like = 0;
     let mut offset = 0;
+    let mut ambiguous = false;
     for line in contents.split_inclusive('\n') {
         let text = line.strip_suffix('\n').unwrap_or(line);
-        if text.contains("decoupling-loginctl") {
-            marker_like += 1;
-        }
         if text == BEGIN || text == END {
-            exact_markers += 1;
+            markers.push((text == BEGIN, offset, offset + line.len()));
+        } else if text.trim_start().starts_with(BEGIN) || text.trim_start().starts_with(END) {
+            ambiguous = true;
         }
-        if let Some(module) = session_module(text) {
-            match module {
-                "pam_env.so" => anchors.push((offset, offset + line.len())),
-                "pam_sessiond.so" => sessiond_entries.push(offset),
-                _ => {}
-            }
+        if session_module(text) == Some("pam_env.so") {
+            anchors.push(offset);
         }
         offset += line.len();
     }
-
-    let blocks = [MANAGED_BLOCK, LEGACY_BLOCK]
-        .into_iter()
-        .flat_map(|block| contents.match_indices(block))
-        .map(|(start, block)| (start, start + block.len()))
-        .collect::<Vec<_>>();
-    if marker_like == 0 {
-        return Analysis {
-            state: BlockState::Inactive,
-            block_range: None,
-            anchors,
-            sessiond_entries,
-            detail: None,
-        };
-    }
-    if blocks.len() != 1 || marker_like != 2 || exact_markers != 2 {
-        let detail = if blocks.len() > 1 || exact_markers > 2 {
-            "duplicate managed blocks or markers"
-        } else {
-            "partially edited or malformed managed block"
-        };
-        return Analysis {
-            state: BlockState::Malformed,
-            block_range: None,
-            anchors,
-            sessiond_entries,
-            detail: Some(detail.to_owned()),
-        };
-    }
-
-    let block_range = blocks[0];
-    let correctly_placed = anchors.len() == 1 && block_range.1 == anchors[0].0;
+    // Only our two exact markers are recognized. Never inspect an included
+    // fragment, module installation, other sessiond entries or old markers.
+    let range = match markers.as_slice() {
+        [(true, begin, _), (false, _, end)] if !ambiguous => Some((*begin, *end)),
+        [] if !ambiguous => {
+            return Analysis {
+                state: BlockState::Inactive,
+                range: None,
+                anchors,
+                detail: None,
+            }
+        }
+        _ => {
+            return Analysis {
+                state: BlockState::Malformed,
+                range: None,
+                anchors,
+                detail: Some("unmatched, duplicate, reversed or ambiguous sglogin markers".into()),
+            }
+        }
+    };
     Analysis {
-        state: if correctly_placed {
-            BlockState::Active
-        } else {
-            BlockState::Moved
-        },
-        block_range: Some(block_range),
+        state: BlockState::Active,
+        range,
         anchors,
-        sessiond_entries,
-        detail: (!correctly_placed).then(|| {
-            "exact managed block is not immediately before the sole pam_env anchor".into()
-        }),
+        detail: None,
     }
 }
-
 fn session_module(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let kind = fields.first()?.strip_prefix('-').unwrap_or(fields[0]);
+    if kind != "session" || fields.len() < 3 {
         return None;
     }
-    let fields = trimmed.split_whitespace().collect::<Vec<_>>();
-    let service_type = fields.first()?.strip_prefix('-').unwrap_or(fields[0]);
-    if service_type != "session" || fields.len() < 3 {
-        return None;
-    }
-    let mut module_index = 2;
-    if fields[1].starts_with('[') {
-        module_index = fields[1..].iter().position(|field| field.ends_with(']'))? + 2;
-    }
-    let module = *fields.get(module_index)?;
-    Some(module.rsplit('/').next().unwrap_or(module))
+    let index = if fields[1].starts_with('[') {
+        fields[1..].iter().position(|f| f.ends_with(']'))? + 2
+    } else {
+        2
+    };
+    fields.get(index)?.rsplit('/').next()
 }
-
 fn read_target(path: &Path) -> Result<(String, Metadata)> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
         .with_context(|| format!("open PAM file {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("inspect PAM file {}", path.display()))?;
-    if !metadata.file_type().is_file() {
-        bail!("PAM target {} is not a regular file", path.display());
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("PAM target is not a regular file");
     }
     let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .with_context(|| format!("read PAM file {} as UTF-8", path.display()))?;
+    file.read_to_string(&mut contents)?;
     Ok((contents, metadata))
 }
-
-struct Lock {
-    file: File,
-}
-
+// These are administrative configuration-edit locks, not session lifecycle locks.
+struct Lock(File);
 impl Lock {
-    fn acquire(target: &Path, operation: libc::c_int) -> Result<Self> {
-        let parent = target
+    fn acquire(path: &Path) -> Result<Self> {
+        let parent = path
             .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .context("PAM target must have a parent directory")?;
-        let file_name = target.file_name().context("PAM target has no file name")?;
-        let mut lock_name = OsString::from(".");
-        lock_name.push(file_name);
-        lock_name.push(".loginctl.lock");
-        let path = parent.join(lock_name);
+            .filter(|p| !p.as_os_str().is_empty())
+            .context("PAM target has no parent")?;
+        let mut name = OsString::from(".");
+        name.push(path.file_name().context("PAM target has no file name")?);
+        name.push(".loginctl.lock");
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&path)
-            .with_context(|| format!("open lock {}", path.display()))?;
-        // SAFETY: flock only reads the valid file descriptor and operation value.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("lock {}", path.display()));
+            .open(parent.join(name))?;
+        // SAFETY: descriptor is live; flock's operation is a constant.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("lock PAM edit");
         }
-        Ok(Self { file })
+        Ok(Self(file))
     }
 }
-
 impl Drop for Lock {
     fn drop(&mut self) {
-        // SAFETY: the descriptor remains valid until the File is dropped.
+        // SAFETY: live owned descriptor.
         unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
-
 fn backup(path: &Path, contents: &[u8], metadata: &Metadata) -> Result<PathBuf> {
-    let parent = path
-        .parent()
-        .context("PAM target has no parent directory")?;
-    let file_name = path.file_name().context("PAM target has no file name")?;
-    for attempt in 0..100_u32 {
-        let mut name = file_name.to_os_string();
+    let parent = path.parent().context("PAM target has no parent")?;
+    for attempt in 0..100 {
+        let mut name = path
+            .file_name()
+            .context("missing file name")?
+            .to_os_string();
         name.push(format!(".loginctl-backup-{}-{attempt}", timestamp()?));
-        let backup = parent.join(name);
-        match create_preserved(&backup, contents, metadata) {
+        let candidate = parent.join(name);
+        match create_preserved(&candidate, contents, metadata) {
             Ok(()) => {
                 sync_directory(parent)?;
-                return Ok(backup);
+                return Ok(candidate);
             }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists) => {}
+            Err(error) if exists(&error) => {}
             Err(error) => return Err(error).context("create PAM backup"),
         }
     }
-    bail!("could not allocate a unique PAM backup name")
+    bail!("cannot allocate PAM backup")
 }
-
+fn exists(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+}
 fn atomic_replace(path: &Path, contents: &[u8], metadata: &Metadata) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("PAM target has no parent directory")?;
-    let file_name = path.file_name().context("PAM target has no file name")?;
-    let mut temporary = None;
-    for attempt in 0..100_u32 {
+    let parent = path.parent().context("PAM target has no parent")?;
+    for attempt in 0..100 {
         let mut name = OsString::from(".");
-        name.push(file_name);
+        name.push(path.file_name().context("missing file name")?);
         name.push(format!(".loginctl-tmp-{}-{attempt}", timestamp()?));
         let candidate = parent.join(name);
         match create_preserved(&candidate, contents, metadata) {
             Ok(()) => {
-                temporary = Some(candidate);
-                break;
+                let result = std::fs::rename(&candidate, path)
+                    .context("replace PAM file")
+                    .and_then(|()| sync_directory(parent));
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&candidate);
+                }
+                return result;
             }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists) => {}
-            Err(error) => return Err(error).context("create replacement PAM file"),
+            Err(error) if exists(&error) => {}
+            Err(error) => return Err(error).context("create PAM replacement"),
         }
     }
-    let temporary = temporary.context("could not allocate a unique temporary PAM file")?;
-    if let Err(error) = std::fs::rename(&temporary, path)
-        .with_context(|| format!("atomically replace {}", path.display()))
-        .and_then(|()| sync_directory(parent))
-    {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
+    bail!("cannot allocate PAM replacement")
 }
-
 fn create_preserved(path: &Path, contents: &[u8], metadata: &Metadata) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -442,41 +281,29 @@ fn create_preserved(path: &Path, contents: &[u8], metadata: &Metadata) -> Result
         .mode(metadata.mode() & 0o7777)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)?;
-    if let Err(error) = (|| -> Result<()> {
+    let result = (|| -> Result<()> {
         file.write_all(contents)?;
-        // SAFETY: fchown acts on a valid descriptor and uses saved numeric IDs.
+        // SAFETY: live descriptor; preserve saved numeric owner and group.
         if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("preserve owner and group");
+            return Err(std::io::Error::last_os_error()).context("preserve PAM ownership");
         }
         file.set_permissions(std::fs::Permissions::from_mode(metadata.mode() & 0o7777))?;
         file.sync_all()?;
         Ok(())
-    })() {
+    })();
+    if result.is_err() {
         drop(file);
         let _ = std::fs::remove_file(path);
-        return Err(error);
     }
-    Ok(())
+    result
 }
-
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .with_context(|| format!("open directory {}", path.display()))?
-        .sync_all()
-        .with_context(|| format!("sync directory {}", path.display()))
+    File::open(path)?.sync_all().context("sync PAM directory")
 }
-
 fn timestamp() -> Result<String> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?;
-    Ok(format!(
-        "{}-{:09}",
-        elapsed.as_secs(),
-        elapsed.subsec_nanos()
-    ))
+    let t = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(format!("{}-{:09}", t.as_secs(), t.subsec_nanos()))
 }
-
 fn ensure_root() -> Result<()> {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -484,227 +311,129 @@ fn ensure_root() -> Result<()> {
     }
     Ok(())
 }
-
-fn exists_label(exists: bool) -> &'static str {
-    if exists {
-        "present"
-    } else {
-        "missing"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, MetadataExt};
-    use tempfile::TempDir;
-
-    const BASE: &str = concat!(
-        "auth required pam_unix.so\n",
-        "session required pam_unix.so\n",
-        "session required pam_env.so\n",
-    );
-
-    fn fixture(contents: &str) -> (TempDir, PathBuf) {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("system-login");
-        std::fs::write(&path, contents).expect("write fixture");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
-            .expect("set fixture mode");
-        (directory, path)
+    use std::os::unix::fs::symlink;
+    const BASE: &str =
+        "auth required pam_unix.so\nsession required pam_unix.so\nsession required pam_env.so\n";
+    fn fixture(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system-login");
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        (dir, path)
     }
-
-    fn activate_fixture(path: &Path) -> Result<String> {
-        activate_impl(path)
+    fn backup_count(dir: &tempfile::TempDir) -> usize {
+        dir.path()
+            .read_dir()
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("loginctl-backup")
+            })
+            .count()
     }
-
-    fn deactivate_fixture(path: &Path) -> Result<String> {
-        deactivate_impl(path)
-    }
-
     #[test]
-    fn classifies_inactive_active_moved_malformed_and_duplicate_blocks() {
-        assert_eq!(analyze(BASE).state, BlockState::Inactive);
-        let active = BASE.replace(
-            "session required pam_env.so\n",
-            &format!("{MANAGED_BLOCK}session required pam_env.so\n"),
-        );
-        assert_eq!(analyze(&active).state, BlockState::Active);
-        assert_eq!(
-            analyze(&format!("{MANAGED_BLOCK}{BASE}")).state,
-            BlockState::Moved
-        );
-        assert_eq!(
-            analyze(&active.replace("timeout=30s", "timeout=5s")).state,
-            BlockState::Malformed
-        );
-        assert_eq!(
-            analyze(&format!("{MANAGED_BLOCK}{MANAGED_BLOCK}{BASE}")).state,
-            BlockState::Malformed
-        );
-    }
-
-    #[test]
-    fn activation_is_atomic_idempotent_and_preserves_metadata() {
-        let (directory, path) = fixture(BASE);
-        let before = std::fs::metadata(&path).expect("metadata");
-        let first = activate_fixture(&path).expect("activate");
-        assert!(first.contains("Backup:"));
+    fn insertion_is_idempotent_atomic_and_preserves_metadata_and_backup() {
+        let (dir, path) = fixture(BASE);
+        let before = std::fs::metadata(&path).unwrap();
+        change(&path, true).unwrap();
         let expected = BASE.replace(
             "session required pam_env.so\n",
             &format!("{MANAGED_BLOCK}session required pam_env.so\n"),
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
-        let after = std::fs::metadata(&path).expect("metadata");
-        assert_eq!(before.uid(), after.uid());
-        assert_eq!(before.gid(), after.gid());
-        assert_eq!(before.mode() & 0o7777, after.mode() & 0o7777);
-        assert_eq!(backup_count(&directory), 1);
-        let backup = backups(&directory).pop().expect("backup path");
-        assert_eq!(std::fs::read_to_string(backup).unwrap(), BASE);
-
-        let second = activate_fixture(&path).expect("idempotent activate");
-        assert!(second.contains("already active"));
-        assert_eq!(backup_count(&directory), 1);
-        assert!(!directory.path().read_dir().unwrap().any(|entry| entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains("tmp")));
-    }
-
-    #[test]
-    fn deactivation_removes_only_the_exact_block_and_is_idempotent() {
-        let admin_line = "session optional pam_sessiond.so timeout=10s\n";
-        let active = BASE.replace(
-            "session required pam_env.so\n",
-            &format!("{admin_line}{MANAGED_BLOCK}session required pam_env.so\n"),
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (before.uid(), before.gid(), before.mode()),
+            (after.uid(), after.gid(), after.mode())
         );
-        let (directory, path) = fixture(&active);
-        deactivate_fixture(&path).expect("deactivate");
+        assert!(change(&path, true).unwrap().contains("already active"));
+        assert_eq!(backup_count(&dir), 1);
+        assert!(status(&path).unwrap().canonical);
+        change(&path, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), BASE);
+        assert!(change(&path, false).unwrap().contains("already inactive"));
+        assert_eq!(backup_count(&dir), 2);
+    }
+    #[test]
+    fn edited_interior_is_replaced_in_place_without_anchor_or_other_entry_validation() {
+        let outside = "session optional pam_sessiond_ready.so\n# administrator comment\n";
+        let text = format!("{outside}# BEGIN sglogin\nanything\nsession optional nonexistent.so\n# END sglogin\nauth required pam_unix.so\n");
+        let (_dir, path) = fixture(&text);
+        assert_eq!(status(&path).unwrap().state, BlockState::Active);
+        assert!(!status(&path).unwrap().canonical);
+        change(&path, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            BASE.replace(
-                "session required pam_env.so\n",
-                &format!("{admin_line}session required pam_env.so\n")
-            )
+            format!("{outside}{MANAGED_BLOCK}auth required pam_unix.so\n")
         );
-        assert_eq!(backup_count(&directory), 1);
-        assert!(deactivate_fixture(&path)
-            .expect("idempotent deactivate")
-            .contains("already inactive"));
-        assert_eq!(backup_count(&directory), 1);
-    }
-
-    #[test]
-    fn mutation_rejects_ambiguous_anchors_and_bad_blocks() {
-        let (_directory, zero) = fixture("session required pam_unix.so\n");
-        assert!(activate_fixture(&zero)
-            .unwrap_err()
-            .to_string()
-            .contains("found 0"));
-        let (_directory, two) = fixture(concat!(
-            "session required pam_env.so\n",
-            "session optional pam_env.so\n"
-        ));
-        assert!(activate_fixture(&two)
-            .unwrap_err()
-            .to_string()
-            .contains("found 2"));
-        let malformed = BASE.replace(
-            "session required pam_env.so\n",
-            concat!(
-                "# BEGIN decoupling-loginctl\n",
-                "-session optional pam_sessiond.so\n",
-                "# END decoupling-loginctl\n",
-                "session required pam_env.so\n"
-            ),
+        std::fs::write(&path, &text).unwrap();
+        change(&path, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{outside}auth required pam_unix.so\n")
         );
-        let (_directory, malformed) = fixture(&malformed);
-        assert!(activate_fixture(&malformed).is_err());
-        assert!(deactivate_fixture(&malformed).is_err());
     }
-
     #[test]
-    fn status_reports_presence_ordering_module_files_and_malformed_detail() {
-        let active = BASE.replace(
-            "session required pam_env.so\n",
-            &format!("{MANAGED_BLOCK}session required pam_env.so\n"),
+    fn a_moved_block_is_not_relocated_and_old_markers_are_not_recognized() {
+        let old = "# BEGIN decoupling-loginctl\nold contents\n# END decoupling-loginctl\n";
+        let (_dir, path) = fixture(&format!("{old}{MANAGED_BLOCK}{BASE}"));
+        change(&path, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{old}{MANAGED_BLOCK}{BASE}")
         );
-        let (directory, path) = fixture(&active);
-        let sessiond = directory.path().join("pam_sessiond.so");
-        std::fs::write(&sessiond, "").unwrap();
-        let status = status_from(&path, &sessiond).unwrap();
-        assert_eq!(status.state, BlockState::Active);
-        assert_eq!(status.sessiond_entries, 1);
-        assert_eq!(status.env_anchors, 1);
-        assert!(status.modules_before_env);
-        assert!(status.sessiond_module_exists);
-        let rendered = status.render();
-        assert!(rendered.contains("Managed block: active"));
-        assert!(rendered.contains("Module ordering: before pam_env"));
-        assert!(!rendered.contains("aclad"));
-    }
-
-    #[test]
-    fn activation_migrates_the_exact_legacy_block() {
-        let legacy = BASE.replace(
-            "session required pam_env.so\n",
-            &format!("{LEGACY_BLOCK}session required pam_env.so\n"),
+        change(&path, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{old}{BASE}")
         );
-        let (directory, path) = fixture(&legacy);
-        assert!(activate_fixture(&path)
-            .unwrap()
-            .contains("Updated PAM integration"));
-        let updated = std::fs::read_to_string(&path).unwrap();
-        assert!(updated.contains(MANAGED_BLOCK));
-        assert!(!updated.contains("pam_aclad.so"));
-        assert_eq!(backup_count(&directory), 1);
-        assert!(activate_fixture(&path).unwrap().contains("already active"));
+        assert_eq!(analyze(old).state, BlockState::Inactive);
     }
-
     #[test]
-    fn public_mutation_requires_root_and_symlink_targets_are_rejected() {
-        let (directory, path) = fixture(BASE);
-        // SAFETY: geteuid has no preconditions.
+    fn malformed_boundaries_and_absent_insertion_anchors_are_rejected_without_changes() {
+        for text in [
+            "# BEGIN sglogin\n",
+            "# END sglogin\n",
+            "# END sglogin\n# BEGIN sglogin\n",
+            " # BEGIN sglogin\n# END sglogin\n",
+            "# BEGIN sglogin edited\n# END sglogin\n",
+            "# BEGIN sglogin\n# BEGIN sglogin\n# END sglogin\n",
+            "# BEGIN sglogin\n# END sglogin\n# END sglogin\n",
+        ] {
+            let (_dir, path) = fixture(text);
+            assert!(change(&path, true).is_err());
+            assert!(change(&path, false).is_err());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+        }
+        for text in [
+            "session required pam_unix.so\n",
+            "session required pam_env.so\nsession optional pam_env.so\n",
+        ] {
+            let (_dir, path) = fixture(text);
+            assert!(change(&path, true).is_err());
+        }
+    }
+    #[test]
+    fn root_and_symlink_guards_remain_and_bracketed_env_anchor_is_supported() {
+        let (dir, path) =
+            fixture("-session [success=1 default=ignore] /usr/lib/security/pam_env.so\n");
+        change(&path, true).unwrap();
+        let link = dir.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(status(&link).is_err());
+        // SAFETY: read effective UID.
         if unsafe { libc::geteuid() } != 0 {
             assert!(activate(&path)
                 .unwrap_err()
                 .to_string()
                 .contains("already-root"));
         }
-        let link = directory.path().join("linked-policy");
-        symlink(&path, &link).expect("create fixture symlink");
-        assert!(status(&link).is_err());
-    }
-
-    #[test]
-    fn recognizes_bracketed_control_and_absolute_module_paths() {
-        assert_eq!(
-            session_module("-session [success=1 default=ignore] /usr/lib/security/pam_env.so"),
-            Some("pam_env.so")
-        );
-        assert_eq!(session_module("auth required pam_env.so"), None);
         assert_eq!(session_module("# session required pam_env.so"), None);
-    }
-
-    fn backups(directory: &TempDir) -> Vec<PathBuf> {
-        directory
-            .path()
-            .read_dir()
-            .unwrap()
-            .filter_map(|entry| {
-                let entry = entry.unwrap();
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("loginctl-backup")
-                    .then(|| entry.path())
-            })
-            .collect()
-    }
-
-    fn backup_count(directory: &TempDir) -> usize {
-        backups(directory).len()
     }
 }
